@@ -45,7 +45,6 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
-// Serve Landing Page on root /
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
   const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
@@ -67,7 +66,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Auto-Update Installer for Linux / macOS / GitBash
+// Windows GitBash / Linux / macOS Installer script (Path-resolved for Windows)
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation/mise-à-jour install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -84,10 +83,14 @@ echo "          CORELABS TUNNEL INSTANT INSTALLER           "
 echo "======================================================"
 echo -e "\\033[0m"
 
-INSTALL_DIR="$HOME/.corelabs-tunnel"
+if command -v cygpath >/dev/null 2>&1 && [ -n "$USERPROFILE" ]; then
+    INSTALL_DIR="$(cygpath -u "$USERPROFILE")/.corelabs-tunnel"
+else
+    INSTALL_DIR="$HOME/.corelabs-tunnel"
+fi
 
 if [ -d "$INSTALL_DIR" ]; then
-    echo "[+] Nettoyage de l'ancienne version CoreLabs Tunnel..."
+    echo "[+] Nettoyage de l'ancienne version..."
     rm -rf "$INSTALL_DIR"
 fi
 
@@ -100,36 +103,22 @@ elif command -v node.exe >/dev/null 2>&1; then
     NODE_CMD="node.exe"
 elif [ -f "/c/Program Files/nodejs/node.exe" ]; then
     NODE_CMD="/c/Program Files/nodejs/node.exe"
-else
-    echo "[!] Node.js n'est pas détecté. Tentative d'installation automatique..."
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update && sudo apt-get install -y nodejs
-    elif command -v brew >/dev/null 2>&1; then
-        brew install node
-    fi
 fi
 
-echo "[+] Téléchargement de la dernière version du CLI depuis ${DOMAIN}..."
+echo "[+] Téléchargement du CLI CoreLabs Tunnel depuis ${DOMAIN}..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
 
-echo "[+] Configuration de la commande globale 'corelabs-tunnel'..."
-cat << 'EOF' > "$INSTALL_DIR/corelabs-tunnel"
-#!/usr/bin/env bash
-curl -fsSL "https://${DOMAIN}/install.sh?v=$(date +%s)" | bash "$@"
-EOF
-chmod +x "$INSTALL_DIR/corelabs-tunnel"
-
-BIN_DIR="/usr/local/bin"
-if [ -w "$BIN_DIR" ]; then
-    cp "$INSTALL_DIR/corelabs-tunnel" "$BIN_DIR/corelabs-tunnel" 2>/dev/null || true
+CLI_FILE="$INSTALL_DIR/cli.js"
+if command -v cygpath >/dev/null 2>&1; then
+    CLI_FILE="$(cygpath -w "$INSTALL_DIR/cli.js")"
 fi
 
-echo -e "\\033[1;32m[✓] Mise à jour terminée ! Lancement de CoreLabs Tunnel...\\033[0m\\n"
-"$NODE_CMD" "$INSTALL_DIR/cli.js" "$@"
+echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
+"$NODE_CMD" "$CLI_FILE" "$@"
 `);
 });
 
-// Auto-Update Installer for Windows PowerShell
+// PowerShell Installer script for Windows
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation/mise-à-jour install.ps1');
   res.setHeader('Content-Type', 'text/plain');
@@ -145,7 +134,7 @@ Write-Host "======================================================" -ForegroundC
 $InstallDir = "$env:USERPROFILE\\.corelabs-tunnel"
 
 if (Test-Path $InstallDir) {
-    Write-Host "[+] Suppression et nettoyage de l'ancienne version..." -ForegroundColor Yellow
+    Write-Host "[+] Nettoyage de l'ancienne version..." -ForegroundColor Yellow
     Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Path $InstallDir | Out-Null
@@ -155,10 +144,6 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
     $NodePath = "node"
 } elseif (Test-Path "C:\\Program Files\\nodejs\\node.exe") {
     $NodePath = "C:\\Program Files\\nodejs\\node.exe"
-} else {
-    Write-Host "[!] Node.js non détecté. Installation automatique via winget..." -ForegroundColor Yellow
-    winget install OpenJS.NodeJS --accept-source-agreements --accept-package-agreements --silent
-    $NodePath = "node"
 }
 
 Write-Host "[+] Téléchargement de la dernière version..." -ForegroundColor Green
@@ -166,17 +151,7 @@ $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
-$BinDir = "$env:LOCALAPPDATA\\Microsoft\\WindowsApps"
-$BatchFile = "$BinDir\\corelabs-tunnel.cmd"
-$BatchContent = @"
-@echo off
-powershell -ExecutionPolicy Bypass -Command "iwr -useb https://${DOMAIN}/install.ps1 | iex" %*
-"@
-Set-Content -Path $BatchFile -Value $BatchContent -ErrorAction SilentlyContinue
-
-Write-Host "[✓] Commande 'corelabs-tunnel' prête !" -ForegroundColor Green
 Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
-
 & $NodePath "$CliPath" $args
 `);
 });
@@ -289,7 +264,6 @@ app.use((req, res, next) => {
 server.listen(PORT, () => {
   log('INFO', `======================================================`);
   log('INFO', `  CORELABS TUNNEL SERVER — Port ${PORT}`);
-  log('INFO', `  Landing Page active sur http://localhost:${PORT}`);
   log('INFO', `  Domain: ${DOMAIN}`);
   log('INFO', `======================================================`);
 });
