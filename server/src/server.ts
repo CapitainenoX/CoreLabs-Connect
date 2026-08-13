@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '2.3.0';
+const SERVER_VERSION = '2.4.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -290,13 +290,22 @@ app.use((req, res, next) => {
     if (sub !== 'tunnel') {
       const requestPath = req.originalUrl || req.url || '/';
       log('INFO', `[Proxy HTTP Stream] Subdomain: ${sub} Path: ${requestPath} (Method: ${req.method})`);
-      const session = activeTunnels.get(sub);
+      
+      let session = activeTunnels.get(sub);
+      if (!session) {
+        for (const [key, sess] of activeTunnels.entries()) {
+          if (key === sub || key === `${sub}-tunnel` || sub === `${key}-tunnel`) {
+            session = sess;
+            break;
+          }
+        }
+      }
 
       if (session && session.ws.readyState === WebSocket.OPEN) {
         const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
         const timeoutId = setTimeout(() => {
-          if (session.pendingRequests.has(requestId)) {
+          if (session && session.pendingRequests.has(requestId)) {
             session.pendingRequests.delete(requestId);
             log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${requestPath}`);
             res.status(504).send(renderPremiumErrorPage(
@@ -629,7 +638,6 @@ wss.on('connection', (ws: WebSocket, req) => {
     }
   });
 
-  // PROTECTED DISCONNECT: Only delete from activeTunnels if the closing WebSocket matches current session
   ws.onclose = () => {
     registeredSubdomains.forEach(sub => {
       const currentSession = activeTunnels.get(sub);

@@ -21,6 +21,20 @@ function debugLog(msg, data) {
   else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
 }
 
+function cleanSubdomainInput(inputStr) {
+  if (!inputStr) return `core-${Math.floor(1000 + Math.random() * 9000)}`;
+  let str = inputStr.trim().toLowerCase();
+  str = str.replace(/^https?:\/\//i, '');
+  str = str.split('/')[0];
+  str = str.split(':')[0];
+  str = str.replace(/\.corelabs\.network$/i, '');
+  str = str.replace(/\.tunnel$/i, '');
+  str = str.replace(/-tunnel$/i, '');
+  str = str.replace(/[^a-z0-9-]/g, '');
+  if (!str) return `core-${Math.floor(1000 + Math.random() * 9000)}`;
+  return str;
+}
+
 function renderAsciiBanner(stepText = '') {
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', `
@@ -30,7 +44,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.2
+                     T U N N E L   v2.4
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -237,6 +251,7 @@ class ZeroDepWebSocketClient {
       path: '/tunnel-bridge',
       method: 'GET',
       headers: {
+        'Host': host,
         'Connection': 'Upgrade',
         'Upgrade': 'websocket',
         'Sec-WebSocket-Key': secKey,
@@ -445,10 +460,11 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
 function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
-  const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
+  const cleanSub = cleanSubdomainInput(reqMsg.subdomain);
+  const publicHost = reqMsg.publicHost || `${cleanSub}-tunnel.${BASE_DOMAIN}`;
   let reqPath = reqMsg.path || '/';
 
-  const targetTunnel = tunnelsList.find(t => t.subdomain === reqMsg.subdomain) || tunnelsList[0];
+  const targetTunnel = tunnelsList.find(t => cleanSubdomainInput(t.subdomain) === cleanSub) || tunnelsList[0];
   let actualTargetHost = targetTunnel.targetHost || '127.0.0.1';
   let actualTargetPort = targetTunnel.targetPort || 80;
 
@@ -470,15 +486,19 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   delete forwardHeaders['accept-encoding'];
   delete forwardHeaders['connection'];
 
+  const isHttpsTarget = actualTargetPort === 443;
+  const httpModule = isHttpsTarget ? https : http;
+
   const options = {
     hostname: actualTargetHost,
     port: actualTargetPort,
     path: reqPath,
     method: reqMsg.method || 'GET',
-    headers: forwardHeaders
+    headers: forwardHeaders,
+    rejectUnauthorized: false
   };
 
-  const localReq = http.request(options, (localRes) => {
+  const localReq = httpModule.request(options, (localRes) => {
     let bodyChunks = [];
     localRes.on('data', chunk => bodyChunks.push(chunk));
     localRes.on('end', () => {
@@ -486,7 +506,6 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
       const headers = Object.assign({}, localRes.headers);
 
-      // Universal Location header rewriting for XAMPP 301/302 redirects
       if (headers.location && typeof headers.location === 'string') {
         headers.location = headers.location
           .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9-]+)(?::\d+)?/gi, `https://${publicHost}`);
@@ -518,12 +537,12 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
 
       const b64Data = fullBuffer.toString('base64');
       
-      debugLog(`Page locale chargée [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain} Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
+      debugLog(`Page locale chargée [${reqMsg.requestId}] Subdomain: ${cleanSub} Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
       
       sendWsMessage({
         type: 'HTTP_RESPONSE',
         requestId: reqMsg.requestId,
-        subdomain: reqMsg.subdomain,
+        subdomain: cleanSub,
         statusCode: localRes.statusCode,
         headers,
         body: b64Data,
@@ -537,7 +556,7 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
     sendWsMessage({
       type: 'HTTP_RESPONSE',
       requestId: reqMsg.requestId,
-      subdomain: reqMsg.subdomain,
+      subdomain: cleanSub,
       statusCode: 502,
       headers: { 'content-type': 'text/html' },
       body: Buffer.from(`
@@ -601,7 +620,7 @@ async function startMultiTunnelSession(sessionConfig) {
         sendWs({
           type: 'REGISTER_MULTI_TUNNEL',
           tunnels: tunnels.map(t => ({
-            subdomain: t.subdomain,
+            subdomain: cleanSubdomainInput(t.subdomain),
             serviceType: t.serviceType,
             targetHost: t.targetHost,
             targetPort: t.targetPort,
@@ -636,7 +655,7 @@ async function startMultiTunnelSession(sessionConfig) {
             if (msg.encryptionKey) currentEncryptionKey = msg.encryptionKey;
             if (msg.tunnels) {
               msg.tunnels.forEach(rt => {
-                const found = tunnels.find(t => t.subdomain === rt.subdomain);
+                const found = tunnels.find(t => cleanSubdomainInput(t.subdomain) === cleanSubdomainInput(rt.subdomain));
                 if (found) found.publicUrl = rt.publicUrl;
               });
             }
@@ -647,7 +666,8 @@ async function startMultiTunnelSession(sessionConfig) {
           }
 
           if (msg.type === 'TCP_CONNECT') {
-            const tMatch = tunnels.find(t => t.subdomain === msg.subdomain) || tunnels[0];
+            const cleanSubMsg = cleanSubdomainInput(msg.subdomain);
+            const tMatch = tunnels.find(t => cleanSubdomainInput(t.subdomain) === cleanSubMsg) || tunnels[0];
             handleTcpConnect(msg, tMatch.targetHost, tMatch.targetPort, sendWs);
           }
 
@@ -745,8 +765,8 @@ async function main() {
 
       renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOMAINE DÉDIÉ (${count})`);
       const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-      let subdomain = await promptInput(`Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
-      subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+      let rawSubdomain = await promptInput(`Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+      let subdomain = cleanSubdomainInput(rawSubdomain);
 
       tunnels.push({
         serviceType: 'web',
@@ -792,8 +812,8 @@ async function main() {
     const targetPort = parseInt(portStr, 10) || parseInt(defaultPort, 10);
 
     const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-    let subdomain = await promptInput(`Nom de votre sous-domaine public ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
-    subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    let rawSubdomain = await promptInput(`Nom de votre sous-domaine public ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+    let subdomain = cleanSubdomainInput(rawSubdomain);
 
     tunnels.push({
       serviceType: serviceTypeChoice,
