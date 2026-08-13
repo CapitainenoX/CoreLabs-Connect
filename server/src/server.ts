@@ -12,6 +12,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
+const BASE_DOMAIN = 'corelabs.network';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -72,7 +73,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Universal bash installer
+// Universal bash installer for Linux / macOS / GitBash
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -93,9 +94,6 @@ else
     INSTALL_DIR="$HOME/.corelabs-tunnel"
 fi
 
-if [ -d "$INSTALL_DIR" ]; then
-    rm -rf "$INSTALL_DIR"
-fi
 mkdir -p "$INSTALL_DIR"
 
 NODE_CMD="node"
@@ -105,12 +103,21 @@ elif command -v node.exe >/dev/null 2>&1; then
     NODE_CMD="node.exe"
 elif [ -f "/c/Program Files/nodejs/node.exe" ]; then
     NODE_CMD="/c/Program Files/nodejs/node.exe"
-elif [ -f "/c/Program Files (x86)/nodejs/node.exe" ]; then
-    NODE_CMD="/c/Program Files (x86)/nodejs/node.exe"
 fi
 
-echo "[+] Téléchargement de CoreLabs Tunnel..."
+echo "[+] Téléchargement de la dernière version..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
+
+cat << 'EOF' > "$INSTALL_DIR/corelabs-tunnel"
+#!/usr/bin/env bash
+curl -fsSL "https://tunnel.corelabs.network/install.sh?v=$(date +%s)" | bash "$@"
+EOF
+chmod +x "$INSTALL_DIR/corelabs-tunnel"
+
+BIN_DIR="/usr/local/bin"
+if [ -w "$BIN_DIR" ]; then
+    cp "$INSTALL_DIR/corelabs-tunnel" "$BIN_DIR/corelabs-tunnel" 2>/dev/null || true
+fi
 
 CLI_FILE="$INSTALL_DIR/cli.js"
 if command -v cygpath >/dev/null 2>&1; then
@@ -122,25 +129,24 @@ echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
 `);
 });
 
-// Universal Windows PowerShell installer
+// PowerShell Installer for Windows (Adds permanently to PATH)
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script install.ps1');
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
 
-  res.send(`# CoreLabs Tunnel Universal Windows Installer
+  res.send(`# CoreLabs Tunnel PowerShell Installer with Permanent PATH Integration
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "          CORELABS TUNNEL INSTANT INSTALLER           " -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
 
 $InstallDir = "$env:USERPROFILE\\.corelabs-tunnel"
-
-if (Test-Path $InstallDir) {
-    Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+if (!(Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
-New-Item -ItemType Directory -Path $InstallDir | Out-Null
 
-$NodePath = ""
+# Resolve Node.js
+$NodePath = "node"
 $PossiblePaths = @(
     "C:\\Program Files\\nodejs\\node.exe",
     "C:\\Program Files (x86)\\nodejs\\node.exe",
@@ -171,13 +177,31 @@ if (-not $NodePath) {
     }
 }
 
-Write-Host "[+] Téléchargement de CoreLabs Tunnel..." -ForegroundColor Green
+Write-Host "[+] Téléchargement de la dernière version..." -ForegroundColor Green
 $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
+# Create cmd shortcut for corelabs-tunnel
+$BatchFile = "$InstallDir\\corelabs-tunnel.cmd"
+$BatchContent = @"
+@echo off
+powershell -ExecutionPolicy Bypass -Command "iwr -useb https://${DOMAIN}/install.ps1 | iex" %*
+"@
+Set-Content -Path $BatchFile -Value $BatchContent -Force
+
+# Permanently add $InstallDir to User PATH environment variable
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($UserPath -notlike "*$InstallDir*") {
+    Write-Host "[+] Ajout de 'corelabs-tunnel' au PATH système Windows..." -ForegroundColor Green
+    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+    $env:Path += ";$InstallDir"
+}
+
+Write-Host "[✓] Commande 'corelabs-tunnel' disponible dans la console !" -ForegroundColor Green
 Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
+
 & "$NodePath" "$CliPath" $args
 `);
 });
@@ -194,7 +218,9 @@ wss.on('connection', (ws: WebSocket, req) => {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        await cfManager.createSubdomainRecord(cleanSubdomain);
+        // 1st-level wildcard subdomain to prevent SSL ERR_SSL_VERSION_OR_CIPHER_MISMATCH
+        const fullSubdomain = `${cleanSubdomain}-tunnel`;
+        await cfManager.createSubdomainRecord(fullSubdomain);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -207,16 +233,17 @@ wss.on('connection', (ws: WebSocket, req) => {
           pendingRequests: new Map()
         });
 
-        let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
+        // Generate 1st-level wildcard SSL compatible URLs
+        let publicUrl = `https://${cleanSubdomain}-tunnel.${BASE_DOMAIN}`;
         if (serviceType === 'minecraft') {
-          publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
+          publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
           subdomain: cleanSubdomain,
           publicUrl,
-          domain: DOMAIN
+          domain: BASE_DOMAIN
         }));
       }
 
@@ -261,26 +288,28 @@ app.post('/api/tunnel/create', async (req, res) => {
   const { subdomain, serviceType, targetHost, targetPort } = req.body;
   if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
-  await cfManager.createSubdomainRecord(subdomain);
+  const cleanSubdomain = subdomain.toLowerCase();
+  const fullSubdomain = `${cleanSubdomain}-tunnel`;
+  await cfManager.createSubdomainRecord(fullSubdomain);
 
-  let publicUrl = `https://${subdomain}.${DOMAIN}`;
+  let publicUrl = `https://${fullSubdomain}.${BASE_DOMAIN}`;
   if (serviceType === 'minecraft') {
-    publicUrl = `${subdomain}.${DOMAIN}:25565`;
+    publicUrl = `${fullSubdomain}.${BASE_DOMAIN}:25565`;
   }
 
   return res.json({
     success: true,
-    subdomain,
+    subdomain: cleanSubdomain,
     publicUrl,
-    domain: DOMAIN,
+    domain: BASE_DOMAIN,
     message: `Tunnel prêt sur ${publicUrl}`
   });
 });
 
-// Wildcard HTTP Proxy Handler
+// Wildcard HTTP Proxy Handler for 1st-level wildcard SSL subdomains
 app.use((req, res, next) => {
   const host = req.headers.host || '';
-  const subdomainMatch = host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
+  const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i) || host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
 
   if (subdomainMatch) {
     const sub = subdomainMatch[1].toLowerCase();
