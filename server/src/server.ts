@@ -34,6 +34,11 @@ app.use(express.static(publicPath, {
   }
 }));
 
+interface PendingRequest {
+  res: express.Response;
+  timeoutId: NodeJS.Timeout;
+}
+
 interface TunnelSession {
   subdomain: string;
   ws: WebSocket;
@@ -41,6 +46,7 @@ interface TunnelSession {
   targetPort: number;
   serviceType: string;
   connectedAt: Date;
+  pendingRequests: Map<string, PendingRequest>;
 }
 
 const activeTunnels = new Map<string, TunnelSession>();
@@ -66,13 +72,11 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Universal bash installer for Linux / macOS / GitBash / WSL
+// Universal bash installer
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script install.sh');
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
 
   res.send(`#!/usr/bin/env bash
 set -e
@@ -118,13 +122,11 @@ echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
 `);
 });
 
-// Universal Windows PowerShell installer (Finds Node.js everywhere)
+// Universal Windows PowerShell installer
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script install.ps1');
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
 
   res.send(`# CoreLabs Tunnel Universal Windows Installer
 Write-Host "======================================================" -ForegroundColor Cyan
@@ -138,7 +140,6 @@ if (Test-Path $InstallDir) {
 }
 New-Item -ItemType Directory -Path $InstallDir | Out-Null
 
-# Resolve Node.js binary on any Windows PC
 $NodePath = ""
 $PossiblePaths = @(
     "C:\\Program Files\\nodejs\\node.exe",
@@ -158,7 +159,7 @@ if (-not $NodePath) {
     if (Get-Command node -ErrorAction SilentlyContinue) {
         $NodePath = "node"
     } else {
-        Write-Host "[!] Node.js non détecté. Installation automatique en cours..." -ForegroundColor Yellow
+        Write-Host "[!] Node.js non détecté. Installation automatique..." -ForegroundColor Yellow
         winget install OpenJS.NodeJS --accept-source-agreements --accept-package-agreements --silent
         foreach ($p in $PossiblePaths) {
             if (Test-Path $p) {
@@ -170,8 +171,7 @@ if (-not $NodePath) {
     }
 }
 
-Write-Host "[+] Node.js détecté : $NodePath" -ForegroundColor Green
-Write-Host "[+] Téléchargement du CLI CoreLabs Tunnel..." -ForegroundColor Green
+Write-Host "[+] Téléchargement de CoreLabs Tunnel..." -ForegroundColor Green
 $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -183,7 +183,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 });
 
 wss.on('connection', (ws: WebSocket, req) => {
-  log('INFO', `Nouvelle connexion WebSocket reçue depuis ${req.socket.remoteAddress}`);
+  log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   let assignedSubdomain: string | null = null;
 
   ws.on('message', async (data: string) => {
@@ -203,7 +203,8 @@ wss.on('connection', (ws: WebSocket, req) => {
           targetHost,
           targetPort,
           serviceType,
-          connectedAt: new Date()
+          connectedAt: new Date(),
+          pendingRequests: new Map()
         });
 
         let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
@@ -219,10 +220,33 @@ wss.on('connection', (ws: WebSocket, req) => {
         }));
       }
 
+      if (msg.type === 'HTTP_RESPONSE') {
+        const { requestId, statusCode, headers, body, subdomain } = msg;
+        const session = activeTunnels.get(subdomain || assignedSubdomain || '');
+
+        if (session) {
+          const pending = session.pendingRequests.get(requestId);
+          if (pending) {
+            clearTimeout(pending.timeoutId);
+            session.pendingRequests.delete(requestId);
+
+            if (headers) {
+              Object.keys(headers).forEach(k => {
+                if (k.toLowerCase() !== 'transfer-encoding') {
+                  pending.res.setHeader(k, headers[k]);
+                }
+              });
+            }
+
+            pending.res.status(statusCode || 200).send(body || '');
+          }
+        }
+      }
+
       if (msg.type === 'PONG') {}
 
     } catch (err: any) {
-      log('ERROR', 'Erreur lors du traitement du message WebSocket', { error: err.message });
+      log('ERROR', 'Erreur message WS', { error: err.message });
     }
   });
 
@@ -253,6 +277,7 @@ app.post('/api/tunnel/create', async (req, res) => {
   });
 });
 
+// Wildcard HTTP Proxy Handler
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   const subdomainMatch = host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
@@ -262,25 +287,36 @@ app.use((req, res, next) => {
     const session = activeTunnels.get(sub);
 
     if (session && session.ws.readyState === WebSocket.OPEN) {
+      const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
+      const timeoutId = setTimeout(() => {
+        if (session.pendingRequests.has(requestId)) {
+          session.pendingRequests.delete(requestId);
+          res.status(504).send(`
+            <html>
+              <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+                <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+                  <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
+                  <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
+                </div>
+              </body>
+            </html>
+          `);
+        }
+      }, 10000);
+
+      session.pendingRequests.set(requestId, { res, timeoutId });
+
       session.ws.send(JSON.stringify({
         type: 'HTTP_REQUEST',
+        requestId,
         method: req.method,
         path: req.url,
-        headers: req.headers
+        headers: req.headers,
+        subdomain: sub
       }));
 
-      return res.send(`
-        <html>
-          <head><title>CoreLabs Tunnel — ${sub}.${DOMAIN}</title></head>
-          <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
-            <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px; background:#121216;">
-              <h2 style="color:#38bdf8;">⚡ CoreLabs Tunnel Connecté</h2>
-              <p style="color:#aaa;">Subdomain: <b>${sub}.${DOMAIN}</b></p>
-              <p style="color:#22c55e;">● Transfert actif en direct vers client ${session.targetHost}:${session.targetPort}</p>
-            </div>
-          </body>
-        </html>
-      `);
+      return;
     }
   }
 

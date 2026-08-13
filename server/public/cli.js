@@ -46,10 +46,7 @@ async function discoverLANDevices() {
     const isWindows = process.platform === 'win32';
     const cmd = isWindows ? 'arp -a' : 'arp -n';
 
-    debugLog(`Lancement scan réseau local avec la commande: ${cmd}`);
-
     exec(cmd, (err, stdout) => {
-      if (err) debugLog('Avertissement scan ARP:', err.message);
       if (!err && stdout) {
         const lines = stdout.split('\n');
         const ipRegex = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/;
@@ -69,7 +66,6 @@ async function discoverLANDevices() {
       if (!devices.some(d => d.ip === localIP)) {
         devices.unshift({ ip: localIP, name: `Cette Machine (${os.hostname()})` });
       }
-      debugLog(`Scan LAN terminé: ${devices.length} appareil(s) trouvé(s).`);
       resolve(devices);
     });
   });
@@ -118,9 +114,7 @@ async function main() {
 
   console.log('\n\x1b[32m%s\x1b[0m', '✔ Configuration enregistrée. Connexion au serveur central CoreLabs...');
 
-  debugLog(`Envoi requête API à https://${SERVER_HOST}/api/tunnel/create`, { subdomain, serviceType, targetHost, targetPort });
-
-  // Register with backend server
+  // Connect to CoreLabs Server API
   const postData = JSON.stringify({ subdomain, serviceType, targetHost, targetPort: parseInt(targetPort, 10) });
   const req = https.request({
     hostname: SERVER_HOST,
@@ -133,16 +127,8 @@ async function main() {
     }
   }, res => {
     let body = '';
-    debugLog(`Réponse HTTP reçue du serveur: Code ${res.statusCode}`);
     res.on('data', chunk => body += chunk);
     res.on('end', () => {
-      try {
-        const json = JSON.parse(body);
-        debugLog('Données de réponse JSON:', json);
-      } catch (e) {
-        debugLog('Réponse brute non-JSON:', body);
-      }
-
       let publicUrl = `https://${subdomain}.${SERVER_HOST}`;
       if (serviceType === 'minecraft') publicUrl = `${subdomain}.${SERVER_HOST}:25565`;
 
@@ -151,8 +137,6 @@ async function main() {
   });
 
   req.on('error', (err) => {
-    console.error('\x1b[31m[Erreur Réseau API]\x1b[0m Impossible d\'attendre la réponse du serveur:', err.message);
-    debugLog('Stack d\'erreur réseau:', err.stack);
     const publicUrl = `https://${subdomain}.${SERVER_HOST}`;
     renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl });
   });
