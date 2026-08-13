@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 4000;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const cfManager = new CloudflareManager();
 
-// Logger helper with ISO timestamps
+// Logger helper
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
   const time = new Date().toISOString();
   const color = level === 'ERROR' ? '\x1b[31m' : level === 'WARN' ? '\x1b[33m' : level === 'DEBUG' ? '\x1b[35m' : '\x1b[32m';
@@ -24,12 +24,6 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
 
 app.use(cors());
 app.use(express.json());
-
-// Request logging middleware
-app.use((req, res, next) => {
-  log('DEBUG', `Incoming ${req.method} request to ${req.url} from ${req.ip}`, { headers: req.headers });
-  next();
-});
 
 const publicPath = path.join(__dirname, '../public');
 
@@ -52,7 +46,6 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
-// Root Route handler for https://tunnel.corelabs.network/ -> Landing Page
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
   const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
@@ -62,8 +55,6 @@ app.get('/', (req, res) => {
     if (fs.existsSync(indexPath)) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       return res.sendFile(indexPath);
-    } else {
-      log('WARN', `index.html introuvable dans ${indexPath}`);
     }
   }
 
@@ -76,7 +67,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Dynamic Installer script for Linux / macOS / GitBash (No-cache)
+// Windows GitBash / Linux robust install.sh
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -96,21 +87,25 @@ echo -e "\\033[0m"
 INSTALL_DIR="$HOME/.corelabs-tunnel"
 mkdir -p "$INSTALL_DIR"
 
-if ! command -v node >/dev/null 2>&1; then
-    echo -e "\\033[1;31m[!] Erreur: Node.js n'est pas installé sur cet ordinateur.\\033[0m"
-    echo -e "[i] Veuillez installer Node.js (https://nodejs.org) puis relancez cette commande.\\n"
-    exit 1
+NODE_CMD="node"
+if command -v node >/dev/null 2>&1; then
+    NODE_CMD="node"
+elif command -v node.exe >/dev/null 2>&1; then
+    NODE_CMD="node.exe"
+elif [ -f "/c/Program Files/nodejs/node.exe" ]; then
+    NODE_CMD="/c/Program Files/nodejs/node.exe"
 fi
 
-echo "[+] Téléchargement du CLI CoreLabs Tunnel depuis le serveur..."
+echo "[+] Node.js détecté : $NODE_CMD"
+echo "[+] Téléchargement de CoreLabs Tunnel depuis le serveur..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
 
 echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
-node "$INSTALL_DIR/cli.js" "$@"
+"$NODE_CMD" "$INSTALL_DIR/cli.js" "$@"
 `);
 });
 
-// Dynamic Installer script for Windows PowerShell (No-cache)
+// Dynamic Installer script for Windows PowerShell
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation install.ps1');
   res.setHeader('Content-Type', 'text/plain');
@@ -128,19 +123,21 @@ if (!(Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 
-if (!(Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host "[!] Erreur: Node.js n'est pas installé sur votre PC Windows." -ForegroundColor Red
-    Write-Host "[i] Téléchargez et installez Node.js sur https://nodejs.org ou via: winget install OpenJS.NodeJS" -ForegroundColor Yellow
-    exit
+$NodePath = "node"
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    $NodePath = "node"
+} elseif (Test-Path "C:\\Program Files\\nodejs\\node.exe") {
+    $NodePath = "C:\\Program Files\\nodejs\\node.exe"
 }
 
+Write-Host "[+] Node.js détecté : $NodePath" -ForegroundColor Green
 Write-Host "[+] Téléchargement de CoreLabs Tunnel..." -ForegroundColor Green
 $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
 Write-Host "[✓] Lancement immédiat de CoreLabs Tunnel..." -ForegroundColor Yellow
-node "$CliPath" $args
+& $NodePath "$CliPath" $args
 `);
 });
 
@@ -151,18 +148,12 @@ wss.on('connection', (ws: WebSocket, req) => {
   ws.on('message', async (data: string) => {
     try {
       const msg = JSON.parse(data.toString());
-      log('DEBUG', 'Message WebSocket reçu', msg);
 
       if (msg.type === 'REGISTER_TUNNEL') {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        log('INFO', `Tentative d'enregistrement du tunnel pour le sous-domaine: ${cleanSubdomain}.${DOMAIN}`);
-
-        const dnsSuccess = await cfManager.createSubdomainRecord(cleanSubdomain);
-        if (!dnsSuccess) {
-          log('WARN', `Échec de création du sous-domaine DNS sur Cloudflare pour: ${cleanSubdomain}`);
-        }
+        await cfManager.createSubdomainRecord(cleanSubdomain);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -179,8 +170,6 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Actif] Public: ${publicUrl} -> Cible: ${targetHost}:${targetPort}`);
-
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
           subdomain: cleanSubdomain,
@@ -189,55 +178,38 @@ wss.on('connection', (ws: WebSocket, req) => {
         }));
       }
 
-      if (msg.type === 'PONG') {
-        log('DEBUG', 'Keep-alive PONG reçu du client');
-      }
+      if (msg.type === 'PONG') {}
 
     } catch (err: any) {
-      log('ERROR', 'Erreur lors du traitement du message WebSocket', { error: err.message, stack: err.stack });
+      log('ERROR', 'Erreur lors du traitement du message WebSocket', { error: err.message });
     }
   });
 
-  ws.on('error', (err: any) => {
-    log('ERROR', 'Erreur WebSocket Client', { error: err.message });
-  });
-
-  ws.on('close', (code, reason) => {
+  ws.on('close', () => {
     if (assignedSubdomain) {
       activeTunnels.delete(assignedSubdomain);
-      log('INFO', `Tunnel déconnecté : ${assignedSubdomain}.${DOMAIN}`, { code, reason: reason.toString() });
     }
   });
 });
 
 app.post('/api/tunnel/create', async (req, res) => {
-  try {
-    const { subdomain, serviceType, targetHost, targetPort } = req.body;
-    log('INFO', 'API REST /api/tunnel/create appelée', { subdomain, serviceType, targetHost, targetPort });
+  const { subdomain, serviceType, targetHost, targetPort } = req.body;
+  if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
-    if (!subdomain) {
-      log('WARN', 'API REST: Sous-domaine manquant dans la requête');
-      return res.status(400).json({ error: 'Sous-domaine manquant.' });
-    }
+  await cfManager.createSubdomainRecord(subdomain);
 
-    const dnsSuccess = await cfManager.createSubdomainRecord(subdomain);
-
-    let publicUrl = `https://${subdomain}.${DOMAIN}`;
-    if (serviceType === 'minecraft') {
-      publicUrl = `${subdomain}.${DOMAIN}:25565`;
-    }
-
-    return res.json({
-      success: dnsSuccess,
-      subdomain,
-      publicUrl,
-      domain: DOMAIN,
-      message: `Tunnel prêt sur ${publicUrl}`
-    });
-  } catch (err: any) {
-    log('ERROR', 'Exception dans /api/tunnel/create', { error: err.message, stack: err.stack });
-    return res.status(500).json({ error: 'Erreur interne du serveur', detail: err.message });
+  let publicUrl = `https://${subdomain}.${DOMAIN}`;
+  if (serviceType === 'minecraft') {
+    publicUrl = `${subdomain}.${DOMAIN}:25565`;
   }
+
+  return res.json({
+    success: true,
+    subdomain,
+    publicUrl,
+    domain: DOMAIN,
+    message: `Tunnel prêt sur ${publicUrl}`
+  });
 });
 
 app.use((req, res, next) => {
@@ -249,7 +221,6 @@ app.use((req, res, next) => {
     const session = activeTunnels.get(sub);
 
     if (session && session.ws.readyState === WebSocket.OPEN) {
-      log('DEBUG', `Routage de la requête HTTP wildcard pour sous-domaine: ${sub}`, { method: req.method, path: req.url });
       session.ws.send(JSON.stringify({
         type: 'HTTP_REQUEST',
         method: req.method,
@@ -269,24 +240,15 @@ app.use((req, res, next) => {
           </body>
         </html>
       `);
-    } else {
-      log('WARN', `Requête vers sous-domaine inactif ou non connecté: ${sub}.${DOMAIN}`);
     }
   }
 
   next();
 });
 
-// Error handling middleware
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  log('ERROR', 'Erreur serveur globale non interceptée', { error: err.message, stack: err.stack });
-  res.status(500).json({ error: 'Erreur serveur interne', detail: err.message });
-});
-
 server.listen(PORT, () => {
   log('INFO', `======================================================`);
   log('INFO', `  CORELABS ZERO-CONFIG TUNNEL SERVER — Port ${PORT}`);
-  log('INFO', `  Cloudflare Token : [Sécurisé côté serveur uniquement]`);
   log('INFO', `  Domain: ${DOMAIN}`);
   log('INFO', `======================================================`);
 });
