@@ -60,7 +60,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.6
+                     T U N N E L   v2.7
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -472,8 +472,55 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// XAMPP / Apache Subfolder Deep Routing & Multi-Page Proxy Handler
-function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
+// XAMPP / Apache Tree-Structure Subfolder Auto-Fallback Engine
+function fetchFromLocalServer(actualTargetHost, actualTargetPort, pathToSend, reqMsg, publicHost, targetTunnel) {
+  return new Promise((resolve) => {
+    const forwardHeaders = Object.assign({}, reqMsg.headers || {});
+    forwardHeaders.host = (actualTargetHost === '127.0.0.1' || actualTargetHost === 'localhost') ? 'localhost' : ((actualTargetPort === 80 || actualTargetPort === 443) ? actualTargetHost : `${actualTargetHost}:${actualTargetPort}`);
+    forwardHeaders['x-forwarded-host'] = publicHost;
+    forwardHeaders['x-forwarded-proto'] = 'https';
+    forwardHeaders['x-forwarded-server'] = publicHost;
+    delete forwardHeaders['accept-encoding'];
+    delete forwardHeaders['connection'];
+
+    const isHttpsTarget = actualTargetPort === 443;
+    const httpModule = isHttpsTarget ? https : http;
+
+    const options = {
+      hostname: actualTargetHost,
+      port: actualTargetPort,
+      path: pathToSend,
+      method: reqMsg.method || 'GET',
+      headers: forwardHeaders,
+      rejectUnauthorized: false
+    };
+
+    const localReq = httpModule.request(options, (localRes) => {
+      let bodyChunks = [];
+      localRes.on('data', chunk => bodyChunks.push(chunk));
+      localRes.on('end', () => {
+        resolve({
+          statusCode: localRes.statusCode || 200,
+          headers: localRes.headers,
+          fullBuffer: Buffer.concat(bodyChunks)
+        });
+      });
+    });
+
+    localReq.on('error', (err) => {
+      resolve({ statusCode: 502, headers: {}, fullBuffer: Buffer.from('') });
+    });
+
+    if (reqMsg.body) {
+      const requestBodyBuffer = Buffer.from(reqMsg.body, 'base64');
+      localReq.write(requestBodyBuffer);
+    }
+
+    localReq.end();
+  });
+}
+
+async function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
   const cleanSub = cleanSubdomainInput(reqMsg.subdomain);
@@ -496,114 +543,72 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
     }
   }
 
-  // Prepend target subfolder if configured and not already included in path
+  // Prepend target subfolder if configured
+  let primaryPath = reqPath;
   if (targetSubfolder) {
     const cleanFolder = targetSubfolder.startsWith('/') ? targetSubfolder : `/${targetSubfolder}`;
     if (!reqPath.startsWith(cleanFolder)) {
-      reqPath = `${cleanFolder}${reqPath.startsWith('/') ? '' : '/'}${reqPath}`;
+      primaryPath = `${cleanFolder}${reqPath.startsWith('/') ? '' : '/'}${reqPath}`;
     }
   }
 
-  const forwardHeaders = Object.assign({}, reqMsg.headers || {});
-  forwardHeaders.host = (actualTargetHost === '127.0.0.1' || actualTargetHost === 'localhost') ? 'localhost' : ((actualTargetPort === 80 || actualTargetPort === 443) ? actualTargetHost : `${actualTargetHost}:${actualTargetPort}`);
-  forwardHeaders['x-forwarded-host'] = publicHost;
-  forwardHeaders['x-forwarded-proto'] = 'https';
-  forwardHeaders['x-forwarded-server'] = publicHost;
-  delete forwardHeaders['accept-encoding'];
-  delete forwardHeaders['connection'];
+  let resObj = await fetchFromLocalServer(actualTargetHost, actualTargetPort, primaryPath, reqMsg, publicHost, targetTunnel);
 
-  const isHttpsTarget = actualTargetPort === 443;
-  const httpModule = isHttpsTarget ? https : http;
-
-  const options = {
-    hostname: actualTargetHost,
-    port: actualTargetPort,
-    path: reqPath,
-    method: reqMsg.method || 'GET',
-    headers: forwardHeaders,
-    rejectUnauthorized: false
-  };
-
-  const localReq = httpModule.request(options, (localRes) => {
-    let bodyChunks = [];
-    localRes.on('data', chunk => bodyChunks.push(chunk));
-    localRes.on('end', () => {
-      let fullBuffer = Buffer.concat(bodyChunks);
-      const contentType = (localRes.headers['content-type'] || '').toLowerCase();
-      const headers = Object.assign({}, localRes.headers);
-
-      if (headers.location && typeof headers.location === 'string') {
-        headers.location = rewriteLocationHeader(headers.location, publicHost, actualTargetHost);
-      }
-
-      if (contentType.includes('text/html') || contentType.includes('javascript') || contentType.includes('json') || contentType.includes('css')) {
-        let contentStr = fullBuffer.toString('utf-8');
-
-        const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
-        contentStr = contentStr
-          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'gi'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\.1:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
-          .replace(/http:\/\/127\.0\.0\.1/gi, `https://${publicHost}`)
-          .replace(/http:\/\/localhost/gi, `https://${publicHost}`);
-
-        if (targetTunnel.autoSubTunnels !== false) {
-          const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/gi;
-          contentStr = contentStr.replace(lanIpRegex, (_, ip, port) => {
-            const ipHyphen = ip.replace(/\./g, '-');
-            const targetPortStr = port || '80';
-            return `https://${publicHost}/lan/${ipHyphen}/${targetPortStr}`;
-          });
-        }
-
-        fullBuffer = Buffer.from(contentStr, 'utf-8');
-      }
-
-      const b64Data = fullBuffer.toString('base64');
-      
-      debugLog(`Page locale chargée [${reqMsg.requestId}] Subdomain: ${cleanSub} Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
-      
-      sendWsMessage({
-        type: 'HTTP_RESPONSE',
-        requestId: reqMsg.requestId,
-        subdomain: cleanSub,
-        statusCode: localRes.statusCode,
-        headers,
-        body: b64Data,
-        isBase64: true
-      });
-    });
-  });
-
-  localReq.on('error', (err) => {
-    debugLog(`Erreur page locale [${reqMsg.requestId}] Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath}`, err.message);
-    sendWsMessage({
-      type: 'HTTP_RESPONSE',
-      requestId: reqMsg.requestId,
-      subdomain: cleanSub,
-      statusCode: 502,
-      headers: { 'content-type': 'text/html' },
-      body: Buffer.from(`
-        <html>
-          <body style="background:#07070a; color:#fff; font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh;">
-            <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:16px; background:#12121a; max-width:450px;">
-              <h2 style="color:#ef4444; margin-bottom:1rem;">⚠️ Service Local Inaccessible (502)</h2>
-              <p style="color:#aaa; font-size:0.95rem;">Impossible de joindre le site sur <b>${actualTargetHost}:${actualTargetPort}</b> pour la sous-page <b>${reqPath}</b></p>
-            </div>
-          </body>
-        </html>
-      `).toString('base64'),
-      isBase64: true
-    });
-  });
-
-  if (reqMsg.body) {
-    const requestBodyBuffer = Buffer.from(reqMsg.body, 'base64');
-    localReq.write(requestBodyBuffer);
+  // XAMPP Tree-Structure Auto-Fallback: If primary path got 404 and reqPath starts with /koogle or subfolder, try without subfolder, or vice versa
+  if (resObj.statusCode === 404 && primaryPath !== reqPath) {
+    debugLog(`[XAMPP Tree Fallback] 404 sur ${primaryPath}, essai de ${reqPath}...`);
+    const fallbackObj = await fetchFromLocalServer(actualTargetHost, actualTargetPort, reqPath, reqMsg, publicHost, targetTunnel);
+    if (fallbackObj.statusCode !== 404) {
+      resObj = fallbackObj;
+    }
   }
 
-  localReq.end();
+  const contentType = (resObj.headers['content-type'] || '').toLowerCase();
+  const headers = Object.assign({}, resObj.headers);
+
+  if (headers.location && typeof headers.location === 'string') {
+    headers.location = rewriteLocationHeader(headers.location, publicHost, actualTargetHost);
+  }
+
+  let fullBuffer = resObj.fullBuffer;
+
+  if (contentType.includes('text/html') || contentType.includes('javascript') || contentType.includes('json') || contentType.includes('css')) {
+    let contentStr = fullBuffer.toString('utf-8');
+
+    const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
+    contentStr = contentStr
+      .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+      .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'gi'), `https://${publicHost}`)
+      .replace(new RegExp(`http:\\/\\/127\\.0\\.0\.1:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+      .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+      .replace(/http:\/\/127\.0\.0\.1/gi, `https://${publicHost}`)
+      .replace(/http:\/\/localhost/gi, `https://${publicHost}`);
+
+    if (targetTunnel.autoSubTunnels !== false) {
+      const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/gi;
+      contentStr = contentStr.replace(lanIpRegex, (_, ip, port) => {
+        const ipHyphen = ip.replace(/\./g, '-');
+        const targetPortStr = port || '80';
+        return `https://${publicHost}/lan/${ipHyphen}/${targetPortStr}`;
+      });
+    }
+
+    fullBuffer = Buffer.from(contentStr, 'utf-8');
+  }
+
+  const b64Data = fullBuffer.toString('base64');
+  
+  debugLog(`Page locale chargée [${reqMsg.requestId}] Subdomain: ${cleanSub} Target: ${actualTargetHost}:${actualTargetPort} Path: ${primaryPath} Status: ${resObj.statusCode}`);
+  
+  sendWsMessage({
+    type: 'HTTP_RESPONSE',
+    requestId: reqMsg.requestId,
+    subdomain: cleanSub,
+    statusCode: resObj.statusCode,
+    headers,
+    body: b64Data,
+    isBase64: true
+  });
 }
 
 async function startMultiTunnelSession(sessionConfig) {
@@ -905,7 +910,7 @@ function renderMultiDashboard(info) {
 
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 📂 Support Sous-Dossiers  │ ${'XAMPP / Apache Prêt'.padEnd(25)} │`);
+    console.log(` │ 📂 Support Sous-Dossiers  │ ${'XAMPP / Apache Tree Prêt'.padEnd(25)} │`);
     console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'3.42 MB/s'.padEnd(25)} │`);
     console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'8.12 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);
