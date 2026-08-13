@@ -54,7 +54,7 @@ const activeTunnels = new Map<string, TunnelSession>();
 
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
-  const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
+  const isMainDomain = host === DOMAIN || host === BASE_DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
 
   if (isMainDomain) {
     const indexPath = path.join(publicPath, 'index.html');
@@ -129,7 +129,7 @@ echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
 `);
 });
 
-// PowerShell Installer for Windows (Adds permanently to PATH)
+// PowerShell Installer for Windows
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script install.ps1');
   res.setHeader('Content-Type', 'text/plain');
@@ -145,7 +145,6 @@ if (!(Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 
-# Resolve Node.js
 $NodePath = "node"
 $PossiblePaths = @(
     "C:\\Program Files\\nodejs\\node.exe",
@@ -183,7 +182,7 @@ $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
-# Create cmd shortcut for corelabs-tunnel
+# Create cmd shortcut
 $BatchFile = "$InstallDir\\corelabs-tunnel.cmd"
 $BatchContent = @"
 @echo off
@@ -199,7 +198,7 @@ if ($UserPath -notlike "*$InstallDir*") {
     $env:Path += ";$InstallDir"
 }
 
-Write-Host "[✓] Commande 'corelabs-tunnel' disponible dans la console !" -ForegroundColor Green
+Write-Host "[✓] Commande 'corelabs-tunnel' disponible !" -ForegroundColor Green
 Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 
 & "$NodePath" "$CliPath" $args
@@ -218,9 +217,8 @@ wss.on('connection', (ws: WebSocket, req) => {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        // 1st-level wildcard subdomain to prevent SSL ERR_SSL_VERSION_OR_CIPHER_MISMATCH
-        const fullSubdomain = `${cleanSubdomain}-tunnel`;
-        await cfManager.createSubdomainRecord(fullSubdomain);
+        // Register 1st-level subdomain on Cloudflare for Instant Universal SSL
+        await cfManager.createSubdomainRecord(cleanSubdomain);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -233,11 +231,12 @@ wss.on('connection', (ws: WebSocket, req) => {
           pendingRequests: new Map()
         });
 
-        // Generate 1st-level wildcard SSL compatible URLs
-        let publicUrl = `https://${cleanSubdomain}-tunnel.${BASE_DOMAIN}`;
+        let publicUrl = `https://${cleanSubdomain}.${BASE_DOMAIN}`;
         if (serviceType === 'minecraft') {
-          publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
+          publicUrl = `${cleanSubdomain}.${BASE_DOMAIN}:25565`;
         }
+
+        log('INFO', `[Tunnel Actif] Public URL: ${publicUrl} -> Cible: ${targetHost}:${targetPort}`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -289,12 +288,11 @@ app.post('/api/tunnel/create', async (req, res) => {
   if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
   const cleanSubdomain = subdomain.toLowerCase();
-  const fullSubdomain = `${cleanSubdomain}-tunnel`;
-  await cfManager.createSubdomainRecord(fullSubdomain);
+  await cfManager.createSubdomainRecord(cleanSubdomain);
 
-  let publicUrl = `https://${fullSubdomain}.${BASE_DOMAIN}`;
+  let publicUrl = `https://${cleanSubdomain}.${BASE_DOMAIN}`;
   if (serviceType === 'minecraft') {
-    publicUrl = `${fullSubdomain}.${BASE_DOMAIN}:25565`;
+    publicUrl = `${cleanSubdomain}.${BASE_DOMAIN}:25565`;
   }
 
   return res.json({
@@ -306,46 +304,49 @@ app.post('/api/tunnel/create', async (req, res) => {
   });
 });
 
-// Wildcard HTTP Proxy Handler for 1st-level wildcard SSL subdomains
+// Wildcard HTTP Proxy Handler for 1st-level wildcard SSL subdomains (*.corelabs.network)
 app.use((req, res, next) => {
   const host = req.headers.host || '';
-  const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i) || host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
+  const subdomainMatch = host.match(/^([a-z0-9-]+)\.corelabs\.network/i);
 
   if (subdomainMatch) {
     const sub = subdomainMatch[1].toLowerCase();
-    const session = activeTunnels.get(sub);
+    // Exclude tunnel.corelabs.network main domain
+    if (sub !== 'tunnel') {
+      const session = activeTunnels.get(sub);
 
-    if (session && session.ws.readyState === WebSocket.OPEN) {
-      const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+      if (session && session.ws.readyState === WebSocket.OPEN) {
+        const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-      const timeoutId = setTimeout(() => {
-        if (session.pendingRequests.has(requestId)) {
-          session.pendingRequests.delete(requestId);
-          res.status(504).send(`
-            <html>
-              <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-                <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-                  <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                  <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
-                </div>
-              </body>
-            </html>
-          `);
-        }
-      }, 10000);
+        const timeoutId = setTimeout(() => {
+          if (session.pendingRequests.has(requestId)) {
+            session.pendingRequests.delete(requestId);
+            res.status(504).send(`
+              <html>
+                <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+                  <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+                    <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
+                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
+                  </div>
+                </body>
+              </html>
+            `);
+          }
+        }, 10000);
 
-      session.pendingRequests.set(requestId, { res, timeoutId });
+        session.pendingRequests.set(requestId, { res, timeoutId });
 
-      session.ws.send(JSON.stringify({
-        type: 'HTTP_REQUEST',
-        requestId,
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        subdomain: sub
-      }));
+        session.ws.send(JSON.stringify({
+          type: 'HTTP_REQUEST',
+          requestId,
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+          subdomain: sub
+        }));
 
-      return;
+        return;
+      }
     }
   }
 

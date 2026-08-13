@@ -6,14 +6,9 @@ const os = require('os');
 const { exec } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
+const BASE_DOMAIN = 'corelabs.network';
 
-function debugLog(msg, data) {
-  const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
-  if (data) console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`, data);
-  else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
-}
-
-function prompt(question, defaultVal) {
+function promptInput(question, defaultVal) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -24,6 +19,55 @@ function prompt(question, defaultVal) {
       rl.close();
       resolve(answer.trim() || defaultVal);
     });
+  });
+}
+
+/**
+ * Interactive Arrow-Key Menu Selector (↑ / ↓ to navigate, Enter to select)
+ */
+function selectMenu(title, choices) {
+  return new Promise((resolve) => {
+    let selectedIndex = 0;
+
+    function render() {
+      console.clear();
+      console.log('\x1b[36m%s\x1b[0m', '======================================================');
+      console.log('\x1b[36m%s\x1b[0m', '          CORELABS TUNNEL — Terminal CLI v1.0         ');
+      console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
+      console.log(`\x1b[1m\x1b[33m? ${title}\x1b[0m \x1b[90m(Utilisez les flèches ↑/↓ et Entrée)\x1b[0m\n`);
+
+      choices.forEach((choice, idx) => {
+        if (idx === selectedIndex) {
+          console.log(` \x1b[36m\x1b[1m❯ ${choice.label}\x1b[0m`);
+        } else {
+          console.log(`   \x1b[90m${choice.label}\x1b[0m`);
+        }
+      });
+    }
+
+    render();
+
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+
+    function onKeypress(_, key) {
+      if (key.ctrl && key.name === 'c') {
+        process.exit(0);
+      }
+      if (key.name === 'up') {
+        selectedIndex = (selectedIndex - 1 + choices.length) % choices.length;
+        render();
+      } else if (key.name === 'down') {
+        selectedIndex = (selectedIndex + 1) % choices.length;
+        render();
+      } else if (key.name === 'return' || key.name === 'enter') {
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+        process.stdin.removeListener('keypress', onKeypress);
+        resolve(choices[selectedIndex].value);
+      }
+    }
+
+    process.stdin.on('keypress', onKeypress);
   });
 }
 
@@ -72,49 +116,52 @@ async function discoverLANDevices() {
 }
 
 async function main() {
+  // Step 1: Interactive Arrow-Key Service Menu
+  const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
+    { label: '🎮  Serveur Minecraft (TCP/UDP - Port 25565)', value: 'minecraft' },
+    { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 3000/80)', value: 'web' },
+    { label: '⚡  Autre service TCP / UDP (Port sur mesure)', value: 'other' }
+  ]);
+
+  let defaultPort = '3000';
+  if (serviceType === 'minecraft') defaultPort = '25565';
+  if (serviceType === 'other') defaultPort = '8080';
+
+  // Step 2: Interactive Arrow-Key Host Menu
+  const hostOption = await selectMenu('Où se situe le service à partager ?', [
+    { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
+    { label: '📡  Un autre appareil du réseau local (LAN)', value: 'lan' }
+  ]);
+
+  let targetHost = '127.0.0.1';
+  let targetHostLabel = 'Localhost (127.0.0.1)';
+
+  if (hostOption === 'lan') {
+    console.log('\n\x1b[36m[+] Analyse du réseau local (LAN) en cours...\x1b[0m');
+    const devices = await discoverLANDevices();
+
+    const lanChoices = devices.map(d => ({
+      label: `🖥️   ${d.ip} — ${d.name}`,
+      value: d
+    }));
+
+    const selectedDevice = await selectMenu('Sélectionnez l\'appareil du réseau local (LAN) à cibler :', lanChoices);
+    targetHost = selectedDevice.ip;
+    targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
+  }
+
+  // Step 3 & 4: Inputs for Port & Subdomain
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
   console.log('\x1b[36m%s\x1b[0m', '          CORELABS TUNNEL — Terminal CLI v1.0         ');
   console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
 
-  console.log('1. Quel type de service souhaitez-vous exposer ?');
-  console.log('   [1] 🎮 Serveur Minecraft (Port 25565)');
-  console.log('   [2] 🌐 Site Web / App HTTP (Port 3000 / 80)');
-  console.log('   [3] ⚡ Autre service TCP / UDP');
-  const typeChoice = await prompt('Votre choix [1-3]', '1');
-
-  let serviceType = 'minecraft';
-  let defaultPort = '25565';
-  if (typeChoice === '2') { serviceType = 'web'; defaultPort = '3000'; }
-  if (typeChoice === '3') { serviceType = 'other'; defaultPort = '8080'; }
-
-  console.log('\n2. Où se situe le service à partager ?');
-  console.log('   [1] 💻 Cette machine (127.0.0.1)');
-  console.log('   [2] 📡 Un autre appareil du réseau local (LAN)');
-  const hostChoice = await prompt('Votre choix [1-2]', '1');
-
-  let targetHost = '127.0.0.1';
-  let targetHostLabel = 'Localhost (127.0.0.1)';
-
-  if (hostChoice === '2') {
-    console.log('\n🔍 Analyse du réseau local (LAN)...');
-    const devices = await discoverLANDevices();
-    devices.forEach((d, idx) => {
-      console.log(`   [${idx + 1}] 🖥️  ${d.ip} — ${d.name}`);
-    });
-    const devIdx = await prompt(`Sélectionnez l'appareil [1-${devices.length}]`, '1');
-    const chosen = devices[parseInt(devIdx, 10) - 1] || devices[0];
-    targetHost = chosen.ip;
-    targetHostLabel = `${chosen.name} (${chosen.ip})`;
-  }
-
-  const targetPort = await prompt('\n3. Sur quel port le service écoute-t-il ?', defaultPort);
+  const targetPort = await promptInput(`Sur quel port le service écoute-t-il sur ${targetHost}`, defaultPort);
   const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-  const subdomain = await prompt('\n4. Choisissez votre sous-domaine (*.tunnel.corelabs.network)', defaultSub);
+  const subdomain = await promptInput(`Choisissez votre sous-domaine (*.${BASE_DOMAIN})`, defaultSub);
 
-  console.log('\n\x1b[32m%s\x1b[0m', '✔ Configuration enregistrée. Connexion au serveur central CoreLabs...');
+  console.log('\n\x1b[32m%s\x1b[0m', '✔ Configuration validée. Connexion au serveur central CoreLabs...');
 
-  // Connect to CoreLabs Server API
   const postData = JSON.stringify({ subdomain, serviceType, targetHost, targetPort: parseInt(targetPort, 10) });
   const req = https.request({
     hostname: SERVER_HOST,
@@ -129,15 +176,15 @@ async function main() {
     let body = '';
     res.on('data', chunk => body += chunk);
     res.on('end', () => {
-      let publicUrl = `https://${subdomain}.${SERVER_HOST}`;
-      if (serviceType === 'minecraft') publicUrl = `${subdomain}.${SERVER_HOST}:25565`;
+      let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
+      if (serviceType === 'minecraft') publicUrl = `${subdomain}.${BASE_DOMAIN}:25565`;
 
       renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl });
     });
   });
 
   req.on('error', (err) => {
-    const publicUrl = `https://${subdomain}.${SERVER_HOST}`;
+    const publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
     renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl });
   });
 
