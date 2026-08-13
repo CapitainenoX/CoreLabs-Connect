@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.5.0';
+const SERVER_VERSION = '1.6.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -390,14 +390,12 @@ wss.on('connection', (ws: WebSocket, req) => {
 
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
-                    headerValue = headerValue
-                      .replace(/http:\/\/127\.0\.0\.1:\d+/g, `https://${publicHost}`)
-                      .replace(/http:\/\/localhost:\d+/g, `https://${publicHost}`)
-                      .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
-                      .replace(/http:\/\/localhost/g, `https://${publicHost}`)
-                      .replace(new RegExp(`http://${session.targetHost}:${session.targetPort}`, 'g'), `https://${publicHost}`)
-                      .replace(new RegExp(`http://${session.targetHost}`, 'g'), `https://${publicHost}`);
-                    log('INFO', `[Redirect Rewritten] Location header -> ${headerValue}`);
+                    
+                    // Comprehensive Location Header Rewriting for 301/302 Redirects
+                    const ipOrHostRegex = /http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9.-]+)(?::\d+)?/gi;
+
+                    headerValue = headerValue.replace(ipOrHostRegex, `https://${publicHost}`);
+                    log('INFO', `[Redirect Rewritten 301/302] Location header -> ${headerValue}`);
                   }
 
                   pending.res.setHeader(k, headerValue);
