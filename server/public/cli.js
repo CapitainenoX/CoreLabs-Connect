@@ -308,9 +308,11 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
-  // Clone headers and rewrite Host for local web application compatibility
+  // Clone headers, rewrite Host for local web app, and disable gzip compression so raw response is returned
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
   forwardHeaders.host = `${targetHost}:${targetPort}`;
+  delete forwardHeaders['accept-encoding'];
+  delete forwardHeaders['connection'];
 
   const options = {
     hostname: targetHost,

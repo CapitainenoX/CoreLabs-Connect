@@ -91,7 +91,8 @@ app.use((req, res, next) => {
     const sub = subdomainMatch[1].toLowerCase();
     
     if (sub !== 'tunnel') {
-      log('INFO', `[Multi-Page Request] Subdomain: ${sub} Path: ${req.url} (Method: ${req.method})`);
+      const requestPath = req.originalUrl || req.url || '/';
+      log('INFO', `[Multi-Page Request] Subdomain: ${sub} Path: ${requestPath} (Method: ${req.method})`);
       const session = activeTunnels.get(sub);
 
       if (session && session.ws.readyState === WebSocket.OPEN) {
@@ -100,13 +101,13 @@ app.use((req, res, next) => {
         const timeoutId = setTimeout(() => {
           if (session.pendingRequests.has(requestId)) {
             session.pendingRequests.delete(requestId);
-            log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${req.url}`);
+            log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${requestPath}`);
             res.status(504).send(`
               <html>
                 <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
                   <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
                     <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu à la page ${req.url}.</p>
+                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu à la page ${requestPath}.</p>
                   </div>
                 </body>
               </html>
@@ -116,19 +117,19 @@ app.use((req, res, next) => {
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
-        // Forward full HTTP request object to client CLI
+        // Forward full HTTP request with original URL
         session.ws.send(JSON.stringify({
           type: 'HTTP_REQUEST',
           requestId,
           method: req.method,
-          path: req.url,
+          path: requestPath,
           headers: req.headers,
           subdomain: sub
         }));
 
         return;
       } else {
-        log('WARN', `Sous-domaine inactif pour la page: ${sub}${req.url}`);
+        log('WARN', `Sous-domaine inactif pour la page: ${sub}${requestPath}`);
         return res.status(404).send(`
           <html>
             <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
@@ -337,7 +338,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             if (headers) {
               Object.keys(headers).forEach(k => {
                 const lowerK = k.toLowerCase();
-                if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length') {
+                if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length' && lowerK !== 'content-encoding') {
                   pending.res.setHeader(k, headers[k]);
                 }
               });
