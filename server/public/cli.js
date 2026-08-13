@@ -143,6 +143,41 @@ async function discoverLANDevices() {
   });
 }
 
+const localTcpSockets = new Map();
+
+function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
+  const { connectionId } = msg;
+  debugLog(`[Minecraft TCP] Connexion joueur entrant [${connectionId}] vers ${targetHost}:${targetPort}`);
+
+  const localSocket = new net.Socket();
+  localTcpSockets.set(connectionId, localSocket);
+
+  localSocket.connect(targetPort, targetHost, () => {
+    debugLog(`[Minecraft TCP] Connecté au serveur local Minecraft [${connectionId}]`);
+  });
+
+  localSocket.on('data', (chunk) => {
+    sendWsMessage({
+      type: 'TCP_DATA',
+      connectionId,
+      data: chunk.toString('base64')
+    });
+  });
+
+  localSocket.on('close', () => {
+    localTcpSockets.delete(connectionId);
+    sendWsMessage({
+      type: 'TCP_CLOSE',
+      connectionId
+    });
+  });
+
+  localSocket.on('error', (err) => {
+    debugLog(`[Minecraft TCP Error] [${connectionId}]`, err.message);
+    localTcpSockets.delete(connectionId);
+  });
+}
+
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP entrante du tunnel [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -284,14 +319,14 @@ async function main() {
     console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${selectedPort}\x1b[0m`);
   } else {
     console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${selectedPort}.\x1b[0m`);
-    console.log(`      \x1b[90mDémarrez votre application web/serveur pour recevoir les requêtes.\x1b[0m`);
+    console.log(`      \x1b[90mDémarrez votre serveur Minecraft pour recevoir les joueurs.\x1b[0m`);
   }
 
   console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
-  console.log(`\n[3/3] ⚡ Connexion du pont WebSocket CoreLabs Server...`);
+  console.log(`\n[3/3] ⚡ Connexion du moteur TCP Minecraft avec CoreLabs Server...`);
 
   let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
-  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:${selectedPort}`;
+  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:25565`;
 
   const NativeWebSocket = globalThis.WebSocket || require('ws');
   
@@ -305,7 +340,7 @@ async function main() {
     };
 
     ws.onopen = () => {
-      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
+      console.log(`      \x1b[32m✔ Moteur TCP Minecraft connecté avec succès !\x1b[0m`);
 
       sendWs({
         type: 'REGISTER_TUNNEL',
@@ -328,9 +363,30 @@ async function main() {
       try {
         const msgData = event.data || event;
         const msg = JSON.parse(msgData.toString());
+
         if (msg.type === 'HTTP_REQUEST') {
           handleIncomingTunnelRequest(msg, targetHost, selectedPort, sendWs);
         }
+
+        if (msg.type === 'TCP_CONNECT') {
+          handleTcpConnect(msg, targetHost, selectedPort, sendWs);
+        }
+
+        if (msg.type === 'TCP_DATA') {
+          const localSocket = localTcpSockets.get(msg.connectionId);
+          if (localSocket && !localSocket.destroyed) {
+            localSocket.write(Buffer.from(msg.data, 'base64'));
+          }
+        }
+
+        if (msg.type === 'TCP_CLOSE') {
+          const localSocket = localTcpSockets.get(msg.connectionId);
+          if (localSocket) {
+            localSocket.destroy();
+            localTcpSockets.delete(msg.connectionId);
+          }
+        }
+
       } catch (err) {
         debugLog('Erreur lecture message WS:', err);
       }
@@ -360,7 +416,7 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '                      CORELABS TUNNEL DASHBOARD                             ');
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
-    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (Lancez votre app sur le port ' + info.targetPort + ')\x1b[0m';
+    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Serveur local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (Lancez Minecraft sur le port ' + info.targetPort + ')\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
@@ -370,7 +426,7 @@ function renderDashboard(info) {
     console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 👥 Connections actives    │ ${'4 connectés'.padEnd(25)} │`);
+    console.log(` │ 👥 Connections actives    │ ${'Connecté'.padEnd(25)} │`);
     console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'1.24 MB/s'.padEnd(25)} │`);
     console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'4.81 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);

@@ -3,6 +3,8 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
+import net from 'net';
+import dgram from 'dgram';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CloudflareManager } from './cloudflare';
 
@@ -43,21 +45,20 @@ interface TunnelSession {
 }
 
 const activeTunnels = new Map<string, TunnelSession>();
+const activeTcpSockets = new Map<string, net.Socket>();
 
-// 1. WILDCARD SUBDOMAIN TUNNEL PROXY (Must be FIRST before static landing page files)
+// 1. WILDCARD SUBDOMAIN TUNNEL PROXY (HTTP)
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
-  // Match [subdomain]-tunnel.corelabs.network or [subdomain].tunnel.corelabs.network or [subdomain].corelabs.network
   const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i) || 
                          host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
 
   if (subdomainMatch) {
     const sub = subdomainMatch[1].toLowerCase();
     
-    // Ignore main domain requests
     if (sub !== 'tunnel') {
-      log('INFO', `[Tunnel Request] Interception sous-domaine: ${sub} (Host: ${host}, Path: ${req.url})`);
+      log('INFO', `[HTTP Request] Subdomain: ${sub} (Host: ${host}, Path: ${req.url})`);
       const session = activeTunnels.get(sub);
 
       if (session && session.ws.readyState === WebSocket.OPEN) {
@@ -112,7 +113,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 2. MAIN DOMAIN LANDING PAGE & STATIC ASSETS
+// 2. STATIC LANDING PAGE
 app.use(express.static(publicPath, {
   setHeaders: (res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
@@ -137,7 +138,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Linux / macOS / GitBash installer
+// Installers
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -185,7 +186,6 @@ echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
 `);
 });
 
-// PowerShell Installer for Windows
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script install.ps1');
   res.setHeader('Content-Type', 'text/plain');
@@ -249,6 +249,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 `);
 });
 
+// WEBSOCKET BRIDGE
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   let assignedSubdomain: string | null = null;
@@ -279,7 +280,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Actif Enregistré] ${cleanSubdomain} -> ${publicUrl} (Cible local: ${targetHost}:${targetPort})`);
+        log('INFO', `[Tunnel Actif Enregistré] ${cleanSubdomain} -> ${publicUrl} (Minecraft/TCP: ${serviceType})`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -299,8 +300,6 @@ wss.on('connection', (ws: WebSocket, req) => {
             clearTimeout(pending.timeoutId);
             session.pendingRequests.delete(requestId);
 
-            log('DEBUG', `[HTTP Proxy Success] ${subdomain}-tunnel.${BASE_DOMAIN} Status: ${statusCode}`);
-
             if (headers) {
               Object.keys(headers).forEach(k => {
                 if (k.toLowerCase() !== 'transfer-encoding') {
@@ -314,7 +313,23 @@ wss.on('connection', (ws: WebSocket, req) => {
         }
       }
 
-      if (msg.type === 'PONG') {}
+      // Handle raw TCP response from local Minecraft server to remote player
+      if (msg.type === 'TCP_DATA') {
+        const { connectionId, data: b64Data } = msg;
+        const tcpSocket = activeTcpSockets.get(connectionId);
+        if (tcpSocket && !tcpSocket.destroyed) {
+          tcpSocket.write(Buffer.from(b64Data, 'base64'));
+        }
+      }
+
+      if (msg.type === 'TCP_CLOSE') {
+        const { connectionId } = msg;
+        const tcpSocket = activeTcpSockets.get(connectionId);
+        if (tcpSocket) {
+          tcpSocket.destroy();
+          activeTcpSockets.delete(connectionId);
+        }
+      }
 
     } catch (err: any) {
       log('ERROR', 'Erreur traitement WebSocket', { error: err.message, stack: err.stack });
@@ -349,6 +364,68 @@ app.post('/api/tunnel/create', async (req, res) => {
     domain: BASE_DOMAIN,
     message: `Tunnel prêt sur ${publicUrl}`
   });
+});
+
+// 3. MINECRAFT TCP SERVER ON PORT 25565 (Pipes raw TCP packets for Minecraft players)
+const MC_TCP_PORT = 25565;
+const mcTcpServer = net.createServer((socket) => {
+  const connectionId = `mc_tcp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+  activeTcpSockets.set(connectionId, socket);
+
+  log('INFO', `[Minecraft Player Connected] Nouveau joueur sur TCP 25565 (${socket.remoteAddress})`);
+
+  // Find active Minecraft tunnel session
+  let mcSession: TunnelSession | null = null;
+  for (const session of activeTunnels.values()) {
+    if (session.serviceType.startsWith('minecraft') && session.ws.readyState === WebSocket.OPEN) {
+      mcSession = session;
+      break;
+    }
+  }
+
+  if (!mcSession) {
+    log('WARN', `Joueur Minecraft refusé: Aucun tunnel Minecraft actif sur le serveur.`);
+    socket.destroy();
+    activeTcpSockets.delete(connectionId);
+    return;
+  }
+
+  // Notify client CLI to connect to local Minecraft server
+  mcSession.ws.send(JSON.stringify({
+    type: 'TCP_CONNECT',
+    connectionId,
+    subdomain: mcSession.subdomain,
+    targetHost: mcSession.targetHost,
+    targetPort: mcSession.targetPort
+  }));
+
+  socket.on('data', (chunk) => {
+    if (mcSession && mcSession.ws.readyState === WebSocket.OPEN) {
+      mcSession.ws.send(JSON.stringify({
+        type: 'TCP_DATA',
+        connectionId,
+        data: chunk.toString('base64')
+      }));
+    }
+  });
+
+  socket.on('close', () => {
+    activeTcpSockets.delete(connectionId);
+    if (mcSession && mcSession.ws.readyState === WebSocket.OPEN) {
+      mcSession.ws.send(JSON.stringify({
+        type: 'TCP_CLOSE',
+        connectionId
+      }));
+    }
+  });
+
+  socket.on('error', () => {
+    activeTcpSockets.delete(connectionId);
+  });
+});
+
+mcTcpServer.listen(MC_TCP_PORT, () => {
+  log('INFO', `[Minecraft TCP Engine] Écoute des joueurs Minecraft sur le port TCP ${MC_TCP_PORT}`);
 });
 
 server.listen(PORT, () => {
