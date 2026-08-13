@@ -4,6 +4,7 @@ const https = require('https');
 const readline = require('readline');
 const os = require('os');
 const net = require('net');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
@@ -73,6 +74,134 @@ function selectMenu(title, choices) {
 
     process.stdin.on('keypress', onKeypress);
   });
+}
+
+/**
+ * 100% Zero-Dependency Native Node.js WebSocket Engine (Works on Node 14, 16, 18, 20, 22)
+ */
+class ZeroDepWebSocketClient {
+  constructor(urlStr) {
+    this.url = urlStr;
+    this.onopen = null;
+    this.onmessage = null;
+    this.onerror = null;
+    this.onclose = null;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.connect();
+  }
+
+  connect() {
+    const isSecure = this.url.startsWith('wss://');
+    const host = SERVER_HOST;
+    const port = isSecure ? 443 : 80;
+    const secKey = crypto.randomBytes(16).toString('base64');
+
+    const reqOptions = {
+      hostname: host,
+      port: port,
+      path: '/tunnel-bridge',
+      method: 'GET',
+      headers: {
+        'Connection': 'Upgrade',
+        'Upgrade': 'websocket',
+        'Sec-WebSocket-Key': secKey,
+        'Sec-WebSocket-Version': '13',
+        'User-Agent': 'CoreLabs-Tunnel-Client/1.0'
+      }
+    };
+
+    const req = (isSecure ? https : http).request(reqOptions);
+
+    req.on('upgrade', (res, socket, head) => {
+      this.socket = socket;
+      if (this.onopen) this.onopen();
+
+      if (head && head.length > 0) {
+        this.handleData(head);
+      }
+
+      socket.on('data', (chunk) => {
+        this.handleData(chunk);
+      });
+
+      socket.on('close', () => {
+        if (this.onclose) this.onclose();
+      });
+
+      socket.on('error', (err) => {
+        if (this.onerror) this.onerror(err);
+      });
+    });
+
+    req.on('error', (err) => {
+      if (this.onerror) this.onerror(err);
+    });
+
+    req.end();
+  }
+
+  handleData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (this.buffer.length >= 2) {
+      const secondByte = this.buffer[1];
+      let payloadLen = secondByte & 0x7f;
+      let headerLen = 2;
+
+      if (payloadLen === 126) {
+        if (this.buffer.length < 4) break;
+        payloadLen = this.buffer.readUInt16BE(2);
+        headerLen = 4;
+      } else if (payloadLen === 127) {
+        if (this.buffer.length < 10) break;
+        payloadLen = Number(this.buffer.readBigUInt64BE(2));
+        headerLen = 10;
+      }
+
+      if (this.buffer.length < headerLen + payloadLen) break;
+
+      const payload = this.buffer.slice(headerLen, headerLen + payloadLen);
+      this.buffer = this.buffer.slice(headerLen + payloadLen);
+
+      if (this.onmessage) {
+        this.onmessage({ data: payload.toString('utf-8') });
+      }
+    }
+  }
+
+  send(dataStr) {
+    if (!this.socket || this.socket.destroyed) return;
+    const payload = Buffer.from(dataStr);
+    const length = payload.length;
+    let headerLen = 2;
+    if (length >= 126 && length <= 65535) headerLen = 4;
+    else if (length > 65535) headerLen = 10;
+
+    const maskKey = crypto.randomBytes(4);
+    const frame = Buffer.alloc(headerLen + 4 + length);
+
+    frame[0] = 0x81; // FIN + Text Frame
+
+    if (length < 126) {
+      frame[1] = 0x80 | length;
+    } else if (length <= 65535) {
+      frame[1] = 0x80 | 126;
+      frame.writeUInt16BE(length, 2);
+    } else {
+      frame[1] = 0x80 | 127;
+      frame.writeBigUInt64BE(BigInt(length), 2);
+    }
+
+    const maskOffset = headerLen;
+    maskKey.copy(frame, maskOffset);
+
+    const payloadOffset = maskOffset + 4;
+    for (let i = 0; i < length; i++) {
+      frame[payloadOffset + i] = payload[i] ^ maskKey[i % 4];
+    }
+
+    this.socket.write(frame);
+  }
 }
 
 function checkLocalPortActive(host, port) {
@@ -147,13 +276,13 @@ const localTcpSockets = new Map();
 
 function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   const { connectionId } = msg;
-  debugLog(`[Minecraft TCP] Connexion joueur entrant [${connectionId}] vers ${targetHost}:${targetPort}`);
+  debugLog(`[Minecraft TCP] Connexion entrant [${connectionId}] -> ${targetHost}:${targetPort}`);
 
   const localSocket = new net.Socket();
   localTcpSockets.set(connectionId, localSocket);
 
   localSocket.connect(targetPort, targetHost, () => {
-    debugLog(`[Minecraft TCP] Connecté au serveur local Minecraft [${connectionId}]`);
+    debugLog(`[Minecraft TCP] Connecté au serveur Minecraft local [${connectionId}]`);
   });
 
   localSocket.on('data', (chunk) => {
@@ -319,28 +448,24 @@ async function main() {
     console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${selectedPort}\x1b[0m`);
   } else {
     console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${selectedPort}.\x1b[0m`);
-    console.log(`      \x1b[90mDémarrez votre serveur Minecraft pour recevoir les joueurs.\x1b[0m`);
+    console.log(`      \x1b[90mDémarrez votre serveur/application pour recevoir le trafic.\x1b[0m`);
   }
 
   console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
-  console.log(`\n[3/3] ⚡ Connexion du moteur TCP Minecraft avec CoreLabs Server...`);
+  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket CoreLabs Server (Zéro-Dépendance)...`);
 
   let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
   if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:25565`;
 
-  const NativeWebSocket = globalThis.WebSocket || require('ws');
-  
   try {
-    const ws = new NativeWebSocket(`wss://${SERVER_HOST}/tunnel-bridge`);
+    const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
 
     const sendWs = (msgObj) => {
-      if (ws.readyState === 1 || ws.readyState === NativeWebSocket.OPEN) {
-        ws.send(JSON.stringify(msgObj));
-      }
+      ws.send(JSON.stringify(msgObj));
     };
 
     ws.onopen = () => {
-      console.log(`      \x1b[32m✔ Moteur TCP Minecraft connecté avec succès !\x1b[0m`);
+      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
 
       sendWs({
         type: 'REGISTER_TUNNEL',
@@ -416,7 +541,7 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '                      CORELABS TUNNEL DASHBOARD                             ');
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
-    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Serveur local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (Lancez Minecraft sur le port ' + info.targetPort + ')\x1b[0m';
+    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service sur le port ' + info.targetPort + ')\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
