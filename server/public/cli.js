@@ -76,9 +76,6 @@ function selectMenu(title, choices) {
   });
 }
 
-/**
- * 100% Zero-Dependency Native Node.js WebSocket Engine (Works on Node 14, 16, 18, 20, 22)
- */
 class ZeroDepWebSocketClient {
   constructor(urlStr) {
     this.url = urlStr;
@@ -307,53 +304,62 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
+// Multi-Page & Asset Proxying Handler
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
-  debugLog(`Requête HTTP entrante du tunnel [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
+  debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
+
+  // Clone headers and rewrite Host for local web application compatibility
+  const forwardHeaders = Object.assign({}, reqMsg.headers || {});
+  forwardHeaders.host = `${targetHost}:${targetPort}`;
 
   const options = {
     hostname: targetHost,
     port: targetPort,
     path: reqMsg.path || '/',
     method: reqMsg.method || 'GET',
-    headers: reqMsg.headers || {}
+    headers: forwardHeaders
   };
 
   const localReq = http.request(options, (localRes) => {
     let bodyChunks = [];
     localRes.on('data', chunk => bodyChunks.push(chunk));
     localRes.on('end', () => {
-      const fullBody = Buffer.concat(bodyChunks).toString('utf-8');
-      debugLog(`Réponse locale [${reqMsg.requestId}] Status: ${localRes.statusCode}`);
+      const fullBuffer = Buffer.concat(bodyChunks);
+      const b64Data = fullBuffer.toString('base64');
+      
+      debugLog(`Page locale chargée [${reqMsg.requestId}] Path: ${reqMsg.path} Status: ${localRes.statusCode}`);
+      
       sendWsMessage({
         type: 'HTTP_RESPONSE',
         requestId: reqMsg.requestId,
         subdomain: reqMsg.subdomain,
         statusCode: localRes.statusCode,
         headers: localRes.headers,
-        body: fullBody
+        body: b64Data,
+        isBase64: true
       });
     });
   });
 
   localReq.on('error', (err) => {
-    debugLog(`Erreur proxying local [${reqMsg.requestId}]`, err.message);
+    debugLog(`Erreur page locale [${reqMsg.requestId}] Path: ${reqMsg.path}`, err.message);
     sendWsMessage({
       type: 'HTTP_RESPONSE',
       requestId: reqMsg.requestId,
       subdomain: reqMsg.subdomain,
       statusCode: 502,
       headers: { 'content-type': 'text/html' },
-      body: `
+      body: Buffer.from(`
         <html>
           <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
             <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Erreur de connexion locale (502)</h2>
-              <p style="color:#aaa;">Impossible de contacter l'application locale sur <b>${targetHost}:${targetPort}</b></p>
-              <p style="color:#8a8a9a; font-size:0.85rem;">Détail : ${err.message}</p>
+              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Page Inaccessible (502)</h2>
+              <p style="color:#aaa;">Impossible de contacter l'application locale sur <b>${targetHost}:${targetPort}</b> pour la page <b>${reqMsg.path}</b></p>
             </div>
           </body>
         </html>
-      `
+      `).toString('base64'),
+      isBase64: true
     });
   });
 

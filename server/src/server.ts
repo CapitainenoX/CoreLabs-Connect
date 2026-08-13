@@ -46,7 +46,6 @@ interface TunnelSession {
 const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
 
-// Minecraft Handshake Packet Parser (Extracts hostname e.g. mycraft-tunnel.corelabs.network)
 function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   try {
     let offset = 0;
@@ -81,7 +80,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN TUNNEL PROXY (HTTP)
+// 1. WILDCARD SUBDOMAIN MULTI-PAGE HTTP PROXY
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -92,31 +91,32 @@ app.use((req, res, next) => {
     const sub = subdomainMatch[1].toLowerCase();
     
     if (sub !== 'tunnel') {
-      log('INFO', `[HTTP Request] Subdomain: ${sub} (Host: ${host}, Path: ${req.url})`);
+      log('INFO', `[Multi-Page Request] Subdomain: ${sub} Path: ${req.url} (Method: ${req.method})`);
       const session = activeTunnels.get(sub);
 
       if (session && session.ws.readyState === WebSocket.OPEN) {
-        const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
         const timeoutId = setTimeout(() => {
           if (session.pendingRequests.has(requestId)) {
             session.pendingRequests.delete(requestId);
-            log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}`);
+            log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${req.url}`);
             res.status(504).send(`
               <html>
                 <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
                   <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
                     <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
+                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu à la page ${req.url}.</p>
                   </div>
                 </body>
               </html>
             `);
           }
-        }, 10000);
+        }, 12000);
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
+        // Forward full HTTP request object to client CLI
         session.ws.send(JSON.stringify({
           type: 'HTTP_REQUEST',
           requestId,
@@ -128,7 +128,7 @@ app.use((req, res, next) => {
 
         return;
       } else {
-        log('WARN', `Sous-domaine inactif ou session fermée pour: ${sub}`);
+        log('WARN', `Sous-domaine inactif pour la page: ${sub}${req.url}`);
         return res.status(404).send(`
           <html>
             <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
@@ -325,7 +325,7 @@ wss.on('connection', (ws: WebSocket, req) => {
       }
 
       if (msg.type === 'HTTP_RESPONSE') {
-        const { requestId, statusCode, headers, body, subdomain } = msg;
+        const { requestId, statusCode, headers, body, isBase64, subdomain } = msg;
         const session = activeTunnels.get(subdomain || assignedSubdomain || '');
 
         if (session) {
@@ -336,13 +336,16 @@ wss.on('connection', (ws: WebSocket, req) => {
 
             if (headers) {
               Object.keys(headers).forEach(k => {
-                if (k.toLowerCase() !== 'transfer-encoding') {
+                const lowerK = k.toLowerCase();
+                if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length') {
                   pending.res.setHeader(k, headers[k]);
                 }
               });
             }
 
-            pending.res.status(statusCode || 200).send(body || '');
+            const responseBuffer = isBase64 ? Buffer.from(body || '', 'base64') : Buffer.from(body || '');
+            pending.res.setHeader('content-length', responseBuffer.length);
+            pending.res.status(statusCode || 200).send(responseBuffer);
           }
         }
       }
@@ -399,7 +402,7 @@ app.post('/api/tunnel/create', async (req, res) => {
   });
 });
 
-// 3. SMART MINECRAFT TCP ENGINE WITH HANDSHAKE SNI ROUTING (Port 25565)
+// 3. MINECRAFT TCP ENGINE (Port 25565)
 const MC_TCP_PORT = 25565;
 const mcTcpServer = net.createServer((socket) => {
   const connectionId = `mc_tcp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
@@ -412,9 +415,8 @@ const mcTcpServer = net.createServer((socket) => {
     if (!handshakeParsed) {
       handshakeParsed = true;
 
-      // Extract Minecraft Handshake target hostname
       const rawHost = parseMinecraftHandshakeHost(firstChunk);
-      log('INFO', `[Minecraft Handshake Entrant] Host tapé dans Minecraft: "${rawHost}" (${socket.remoteAddress})`);
+      log('INFO', `[Minecraft Handshake Entrant] Host: "${rawHost}" (${socket.remoteAddress})`);
 
       if (rawHost) {
         const cleanHost = rawHost.split('\0')[0].split(':')[0].toLowerCase();
@@ -426,7 +428,6 @@ const mcTcpServer = net.createServer((socket) => {
         }
       }
 
-      // Fallback: Pick any active Minecraft session if single user
       if (!targetSession) {
         for (const session of activeTunnels.values()) {
           if (session.serviceType.startsWith('minecraft') && session.ws.readyState === WebSocket.OPEN) {
@@ -437,7 +438,7 @@ const mcTcpServer = net.createServer((socket) => {
       }
 
       if (!targetSession) {
-        log('WARN', `Joueur Minecraft refusé: Aucun tunnel Minecraft trouvé pour l'hôte "${rawHost}".`);
+        log('WARN', `Joueur Minecraft refusé: Aucun tunnel Minecraft trouvé.`);
         socket.destroy();
         activeTcpSockets.delete(connectionId);
         return;
@@ -445,14 +446,12 @@ const mcTcpServer = net.createServer((socket) => {
 
       log('INFO', `[Minecraft Router] Joueur connecté au tunnel: ${targetSession.subdomain} -> ${targetSession.targetHost}:${targetSession.targetPort}`);
 
-      // Send TCP_CONNECT to client CLI
       targetSession.ws.send(JSON.stringify({
         type: 'TCP_CONNECT',
         connectionId,
         subdomain: targetSession.subdomain
       }));
 
-      // Send the first Handshake chunk down the WebSocket
       targetSession.ws.send(JSON.stringify({
         type: 'TCP_DATA',
         connectionId,
@@ -460,7 +459,6 @@ const mcTcpServer = net.createServer((socket) => {
       }));
 
     } else {
-      // Subsequent TCP chunks
       if (targetSession && targetSession.ws.readyState === WebSocket.OPEN) {
         targetSession.ws.send(JSON.stringify({
           type: 'TCP_DATA',
