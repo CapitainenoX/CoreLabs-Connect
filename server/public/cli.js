@@ -30,7 +30,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.1
+                     T U N N E L   v2.2
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -441,6 +441,7 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
+// XAMPP / Apache Subfolder Deep Routing & Multi-Page Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -462,7 +463,7 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   }
 
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
-  forwardHeaders.host = (actualTargetPort === 80 || actualTargetPort === 443) ? actualTargetHost : `${actualTargetHost}:${actualTargetPort}`;
+  forwardHeaders.host = (actualTargetHost === '127.0.0.1' || actualTargetHost === 'localhost') ? 'localhost' : ((actualTargetPort === 80 || actualTargetPort === 443) ? actualTargetHost : `${actualTargetHost}:${actualTargetPort}`);
   forwardHeaders['x-forwarded-host'] = publicHost;
   forwardHeaders['x-forwarded-proto'] = 'https';
   forwardHeaders['x-forwarded-server'] = publicHost;
@@ -485,35 +486,34 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
       const headers = Object.assign({}, localRes.headers);
 
+      // Universal Location header rewriting for XAMPP 301/302 redirects
       if (headers.location && typeof headers.location === 'string') {
-        const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         headers.location = headers.location
-          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
-          .replace(/http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+          .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9-]+)(?::\d+)?/gi, `https://${publicHost}`);
       }
 
-      if (contentType.includes('text/html')) {
-        let htmlStr = fullBuffer.toString('utf-8');
+      if (contentType.includes('text/html') || contentType.includes('javascript') || contentType.includes('json') || contentType.includes('css')) {
+        let contentStr = fullBuffer.toString('utf-8');
 
         const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
-        htmlStr = htmlStr
-          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\.1:${actualTargetPort}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'g'), `https://${publicHost}`)
-          .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
-          .replace(/http:\/\/localhost/g, `https://${publicHost}`);
+        contentStr = contentStr
+          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'gi'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\.1:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'gi'), `https://${publicHost}`)
+          .replace(/http:\/\/127\.0\.0\.1/gi, `https://${publicHost}`)
+          .replace(/http:\/\/localhost/gi, `https://${publicHost}`);
 
         if (targetTunnel.autoSubTunnels !== false) {
-          const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/g;
-          htmlStr = htmlStr.replace(lanIpRegex, (_, ip, port) => {
+          const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/gi;
+          contentStr = contentStr.replace(lanIpRegex, (_, ip, port) => {
             const ipHyphen = ip.replace(/\./g, '-');
             const targetPortStr = port || '80';
             return `https://${publicHost}/lan/${ipHyphen}/${targetPortStr}`;
           });
         }
 
-        fullBuffer = Buffer.from(htmlStr, 'utf-8');
+        fullBuffer = Buffer.from(contentStr, 'utf-8');
       }
 
       const b64Data = fullBuffer.toString('base64');

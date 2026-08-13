@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '2.1.0';
+const SERVER_VERSION = '2.2.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -219,7 +219,7 @@ function renderPremiumErrorPage(title: string, subtitle: string, message: string
     <a href="https://${DOMAIN}" class="btn">Consulter CoreLabs Network</a>
 
     <div class="footer">
-      CoreLabs Tunnel Engine &bull; Support Sous-Dossiers & XAMPP Intégré
+      CoreLabs Tunnel Engine &bull; Transport Sécurisé
     </div>
   </div>
 </body>
@@ -277,7 +277,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL, XAMPP SUBFOLDER & DEEP ROUTER
+// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & UNIVERSAL XAMPP SUBFOLDER ROUTER
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -498,7 +498,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 `);
 });
 
-// WEBSOCKET BRIDGE
+// WEBSOCKET BRIDGE WITH UNIVERSAL LOCATION REWRITING FOR XAMPP SUBFOLDERS
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   const registeredSubdomains: string[] = [];
@@ -584,13 +584,12 @@ wss.on('connection', (ws: WebSocket, req) => {
                 if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length' && lowerK !== 'content-encoding') {
                   let headerValue = headers[k];
 
+                  // Universal Location header rewriting for XAMPP 301/302 redirects
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
-                    const targetHostEscaped = session.targetHost.replace(/\./g, '\\.');
-
+                    
                     headerValue = headerValue
-                      .replace(new RegExp(`http:\\/\\/${targetHostEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
-                      .replace(/http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+                      .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9-]+)(?::\d+)?/gi, `https://${publicHost}`);
                     
                     log('INFO', `[Redirect Rewritten 301/302] Location header -> ${headerValue}`);
                   }
