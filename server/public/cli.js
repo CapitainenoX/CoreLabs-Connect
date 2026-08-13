@@ -7,7 +7,7 @@ const net = require('net');
 const { exec } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
-const BASE_DOMAIN = 'tunnel.corelabs.network';
+const BASE_DOMAIN = 'corelabs.network';
 
 function debugLog(msg, data) {
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
@@ -262,13 +262,13 @@ async function main() {
 
   const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
   const subChoices = [
-    { label: `✨  Sous-domaine auto-généré (${defaultSub}.${BASE_DOMAIN})`, value: defaultSub },
-    { label: `✏️   Personnaliser le sous-domaine ([nom].${BASE_DOMAIN})`, value: 'CUSTOM' }
+    { label: `✨  Sous-domaine auto-généré (${defaultSub}-tunnel.${BASE_DOMAIN})`, value: defaultSub },
+    { label: `✏️   Personnaliser le sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, value: 'CUSTOM' }
   ];
 
   let subdomain = await selectMenu(`Choix du nom de domaine sur ${BASE_DOMAIN} :`, subChoices);
   if (subdomain === 'CUSTOM') {
-    subdomain = await promptInput(`Saisissez votre sous-domaine ([nom].${BASE_DOMAIN})`, defaultSub);
+    subdomain = await promptInput(`Saisissez votre sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
     subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
   }
 
@@ -287,11 +287,11 @@ async function main() {
     console.log(`      \x1b[90mDémarrez votre application web/serveur pour recevoir les requêtes.\x1b[0m`);
   }
 
-  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}.${BASE_DOMAIN})...`);
+  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
   console.log(`\n[3/3] ⚡ Connexion du pont WebSocket CoreLabs Server...`);
 
-  let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
-  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
+  let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
+  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:${selectedPort}`;
 
   const NativeWebSocket = globalThis.WebSocket || require('ws');
   

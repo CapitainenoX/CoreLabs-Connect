@@ -12,6 +12,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
+const BASE_DOMAIN = 'corelabs.network';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -51,10 +52,9 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
-// Main Root Route for https://tunnel.corelabs.network/
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
-  const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
+  const isMainDomain = host === DOMAIN || host === BASE_DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
 
   if (isMainDomain) {
     const indexPath = path.join(publicPath, 'index.html');
@@ -186,7 +186,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 });
 
 wss.on('connection', (ws: WebSocket, req) => {
-  log('INFO', `Nouvelle connexion WebSocket reçue depuis ${req.socket.remoteAddress}`);
+  log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   let assignedSubdomain: string | null = null;
 
   ws.on('message', async (data: string) => {
@@ -197,8 +197,9 @@ wss.on('connection', (ws: WebSocket, req) => {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        // Target domain format: [subdomain].tunnel.corelabs.network
-        await cfManager.createSubdomainRecord(`${cleanSubdomain}.tunnel`);
+        // Target domain format: [subdomain]-tunnel.corelabs.network (1st level wildcard SSL ready!)
+        const fullSubdomain = `${cleanSubdomain}-tunnel`;
+        await cfManager.createSubdomainRecord(fullSubdomain);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -211,9 +212,9 @@ wss.on('connection', (ws: WebSocket, req) => {
           pendingRequests: new Map()
         });
 
-        let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
+        let publicUrl = `https://${cleanSubdomain}-tunnel.${BASE_DOMAIN}`;
         if (serviceType.startsWith('minecraft')) {
-          publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
+          publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
         log('INFO', `[Tunnel Actif] Public URL: ${publicUrl} -> Cible: ${targetHost}:${targetPort}`);
@@ -222,7 +223,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           type: 'TUNNEL_READY',
           subdomain: cleanSubdomain,
           publicUrl,
-          domain: DOMAIN
+          domain: BASE_DOMAIN
         }));
       }
 
@@ -236,7 +237,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             clearTimeout(pending.timeoutId);
             session.pendingRequests.delete(requestId);
 
-            log('DEBUG', `[HTTP Proxy Response] ${subdomain}.${DOMAIN} Status: ${statusCode}`);
+            log('DEBUG', `[HTTP Proxy Response] ${subdomain}-tunnel.${BASE_DOMAIN} Status: ${statusCode}`);
 
             if (headers) {
               Object.keys(headers).forEach(k => {
@@ -261,7 +262,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   ws.on('close', () => {
     if (assignedSubdomain) {
       activeTunnels.delete(assignedSubdomain);
-      log('INFO', `Tunnel fermé: ${assignedSubdomain}.${DOMAIN}`);
+      log('INFO', `Tunnel fermé: ${assignedSubdomain}-tunnel.${BASE_DOMAIN}`);
     }
   });
 });
@@ -271,32 +272,33 @@ app.post('/api/tunnel/create', async (req, res) => {
   if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
   const cleanSubdomain = subdomain.toLowerCase();
-  await cfManager.createSubdomainRecord(`${cleanSubdomain}.tunnel`);
+  const fullSubdomain = `${cleanSubdomain}-tunnel`;
+  await cfManager.createSubdomainRecord(fullSubdomain);
 
-  let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
+  let publicUrl = `https://${fullSubdomain}.${BASE_DOMAIN}`;
   if (serviceType.startsWith('minecraft')) {
-    publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
+    publicUrl = `${fullSubdomain}.${BASE_DOMAIN}:25565`;
   }
 
   return res.json({
     success: true,
     subdomain: cleanSubdomain,
     publicUrl,
-    domain: DOMAIN,
+    domain: BASE_DOMAIN,
     message: `Tunnel prêt sur ${publicUrl}`
   });
 });
 
-// Wildcard HTTP Proxy Handler for *.tunnel.corelabs.network
+// Wildcard HTTP Proxy Handler for [subdomain]-tunnel.corelabs.network
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   log('DEBUG', `Interception hôte entrant: ${host} (Path: ${req.url})`);
 
-  const subdomainMatch = host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
+  const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i);
 
   if (subdomainMatch) {
     const sub = subdomainMatch[1].toLowerCase();
-    log('INFO', `Requête vers sous-domaine tunnel: ${sub}.${DOMAIN}`);
+    log('INFO', `Requête vers sous-domaine tunnel: ${sub}-tunnel.${BASE_DOMAIN}`);
 
     const session = activeTunnels.get(sub);
 
@@ -306,7 +308,7 @@ app.use((req, res, next) => {
       const timeoutId = setTimeout(() => {
         if (session.pendingRequests.has(requestId)) {
           session.pendingRequests.delete(requestId);
-          log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}.${DOMAIN}`);
+          log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}-tunnel.${BASE_DOMAIN}`);
           res.status(504).send(`
             <html>
               <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
@@ -333,7 +335,7 @@ app.use((req, res, next) => {
 
       return;
     } else {
-      log('WARN', `Sous-domaine introuvable ou session WebSocket inactive pour: ${sub}.${DOMAIN}`);
+      log('WARN', `Sous-domaine introuvable ou session WebSocket inactive pour: ${sub}-tunnel.${BASE_DOMAIN}`);
     }
   }
 
