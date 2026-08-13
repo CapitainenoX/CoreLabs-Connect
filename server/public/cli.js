@@ -5,6 +5,7 @@ const readline = require('readline');
 const os = require('os');
 const net = require('net');
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 
@@ -15,6 +16,37 @@ function debugLog(msg, data) {
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
   if (data) console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`, data);
   else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
+}
+
+function getInstallDir() {
+  if (process.platform === 'win32' && process.env.USERPROFILE) {
+    return path.join(process.env.USERPROFILE, '.corelabs-tunnel');
+  }
+  return path.join(os.homedir(), '.corelabs-tunnel');
+}
+
+function saveActiveSession(sessionInfo) {
+  try {
+    const dir = getInstallDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const sessionPath = path.join(dir, 'active-session.json');
+    fs.writeFileSync(sessionPath, JSON.stringify(sessionInfo, null, 2));
+  } catch (err) {
+    debugLog('Erreur sauvegarde session:', err.message);
+  }
+}
+
+function loadActiveSession() {
+  try {
+    const sessionPath = path.join(getInstallDir(), 'active-session.json');
+    if (fs.existsSync(sessionPath)) {
+      const data = fs.readFileSync(sessionPath, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    debugLog('Erreur lecture session:', err.message);
+  }
+  return null;
 }
 
 function autoUpdateAndRestart() {
@@ -28,9 +60,9 @@ function autoUpdateAndRestart() {
     fileStream.on('finish', () => {
       fileStream.close(() => {
         console.log('\x1b[32m✔ Mise à jour appliquée avec succès !\x1b[0m');
-        console.log('\x1b[33m🔄 Redémarrage automatique du CLI...\x1b[0m\n');
+        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel...\x1b[0m\n');
         
-        const child = spawn(process.argv[0], process.argv.slice(1), {
+        const child = spawn(process.argv[0], [__filename, '--auto-resume'], {
           detached: true,
           stdio: 'inherit'
         });
@@ -206,7 +238,7 @@ class ZeroDepWebSocketClient {
     const maskKey = crypto.randomBytes(4);
     const frame = Buffer.alloc(headerLen + 4 + length);
 
-    frame[0] = 0x81; // FIN + Text Frame
+    frame[0] = 0x81;
 
     if (length < 126) {
       frame[1] = 0x80 | length;
@@ -333,7 +365,6 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page & Link Rewriting Proxy Handler (Adapts to Port 80, 3000, 8080, 443, etc.)
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -361,7 +392,6 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
       let fullBuffer = Buffer.concat(bodyChunks);
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
 
-      // If response is HTML, rewrite hardcoded local IPs/ports to the tunnel domain for ALL ports (80, 3000, 8080, etc.)
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
 
@@ -413,7 +443,6 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
     });
   });
 
-  // Forward incoming POST/PUT request body to local application
   if (reqMsg.body) {
     const requestBodyBuffer = Buffer.from(reqMsg.body, 'base64');
     localReq.write(requestBodyBuffer);
@@ -422,7 +451,120 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
   localReq.end();
 }
 
+async function startTunnelSession(config) {
+  const { serviceType, targetHost, targetHostLabel, targetPort, subdomain } = config;
+
+  // Save session configuration for seamless auto-resume after updates
+  saveActiveSession(config);
+
+  console.clear();
+  console.log('\x1b[36m%s\x1b[0m', '======================================================');
+  console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
+  console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
+
+  console.log(`[1/3] 🔍 Vérification du service local (${targetHost}:${targetPort})...`);
+  const isPortActive = await checkLocalPortActive(targetHost, targetPort);
+
+  if (isPortActive) {
+    console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${targetPort}\x1b[0m`);
+  } else {
+    console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${targetPort}.\x1b[0m`);
+    console.log(`      \x1b[90mDémarrez votre serveur/application pour recevoir le trafic.\x1b[0m`);
+  }
+
+  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
+  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket CoreLabs Server (Zéro-Dépendance)...`);
+
+  let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
+  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:25565`;
+
+  try {
+    const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
+
+    const sendWs = (msgObj) => {
+      ws.send(JSON.stringify(msgObj));
+    };
+
+    ws.onopen = () => {
+      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
+
+      sendWs({
+        type: 'REGISTER_TUNNEL',
+        subdomain,
+        serviceType,
+        targetHost,
+        targetPort
+      });
+
+      setInterval(() => {
+        sendWs({ type: 'PING' });
+      }, 15000);
+
+      setTimeout(() => {
+        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+      }, 800);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msgData = event.data || event;
+        const msg = JSON.parse(msgData.toString());
+
+        if (msg.type === 'UPDATE_CLIENT') {
+          autoUpdateAndRestart();
+          return;
+        }
+
+        if (msg.type === 'HTTP_REQUEST') {
+          handleIncomingTunnelRequest(msg, targetHost, targetPort, sendWs);
+        }
+
+        if (msg.type === 'TCP_CONNECT') {
+          handleTcpConnect(msg, targetHost, targetPort, sendWs);
+        }
+
+        if (msg.type === 'TCP_DATA') {
+          const localSocket = localTcpSockets.get(msg.connectionId);
+          if (localSocket && !localSocket.destroyed) {
+            localSocket.write(Buffer.from(msg.data, 'base64'));
+          }
+        }
+
+        if (msg.type === 'TCP_CLOSE') {
+          const localSocket = localTcpSockets.get(msg.connectionId);
+          if (localSocket) {
+            localSocket.destroy();
+            localTcpSockets.delete(msg.connectionId);
+          }
+        }
+
+      } catch (err) {
+        debugLog('Erreur lecture message WS:', err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      debugLog('Erreur connexion WebSocket:', err);
+      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+    };
+
+  } catch (err) {
+    debugLog('Exception connexion WS:', err);
+    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+  }
+}
+
 async function main() {
+  // Check if auto-resuming from update
+  if (process.argv.includes('--auto-resume')) {
+    const savedSession = loadActiveSession();
+    if (savedSession) {
+      console.log('\x1b[32m✔ Session précédente restaurée avec succès !\x1b[0m');
+      await startTunnelSession(savedSession);
+      return;
+    }
+  }
+
   const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
     { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
     { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
@@ -499,101 +641,13 @@ async function main() {
     subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
   }
 
-  console.clear();
-  console.log('\x1b[36m%s\x1b[0m', '======================================================');
-  console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
-  console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
-
-  console.log(`[1/3] 🔍 Vérification du service local (${targetHost}:${selectedPort})...`);
-  const isPortActive = await checkLocalPortActive(targetHost, selectedPort);
-
-  if (isPortActive) {
-    console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${selectedPort}\x1b[0m`);
-  } else {
-    console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${selectedPort}.\x1b[0m`);
-    console.log(`      \x1b[90mDémarrez votre serveur/application pour recevoir le trafic.\x1b[0m`);
-  }
-
-  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
-  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket CoreLabs Server (Zéro-Dépendance)...`);
-
-  let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
-  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:25565`;
-
-  try {
-    const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
-
-    const sendWs = (msgObj) => {
-      ws.send(JSON.stringify(msgObj));
-    };
-
-    ws.onopen = () => {
-      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
-
-      sendWs({
-        type: 'REGISTER_TUNNEL',
-        subdomain,
-        serviceType,
-        targetHost,
-        targetPort: selectedPort
-      });
-
-      setInterval(() => {
-        sendWs({ type: 'PING' });
-      }, 15000);
-
-      setTimeout(() => {
-        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
-      }, 800);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msgData = event.data || event;
-        const msg = JSON.parse(msgData.toString());
-
-        if (msg.type === 'UPDATE_CLIENT') {
-          autoUpdateAndRestart();
-          return;
-        }
-
-        if (msg.type === 'HTTP_REQUEST') {
-          handleIncomingTunnelRequest(msg, targetHost, selectedPort, sendWs);
-        }
-
-        if (msg.type === 'TCP_CONNECT') {
-          handleTcpConnect(msg, targetHost, selectedPort, sendWs);
-        }
-
-        if (msg.type === 'TCP_DATA') {
-          const localSocket = localTcpSockets.get(msg.connectionId);
-          if (localSocket && !localSocket.destroyed) {
-            localSocket.write(Buffer.from(msg.data, 'base64'));
-          }
-        }
-
-        if (msg.type === 'TCP_CLOSE') {
-          const localSocket = localTcpSockets.get(msg.connectionId);
-          if (localSocket) {
-            localSocket.destroy();
-            localTcpSockets.delete(msg.connectionId);
-          }
-        }
-
-      } catch (err) {
-        debugLog('Erreur lecture message WS:', err);
-      }
-    };
-
-    ws.onerror = (err) => {
-      debugLog('Erreur connexion WebSocket:', err);
-      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
-    };
-
-  } catch (err) {
-    debugLog('Exception connexion WS:', err);
-    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
-  }
+  await startTunnelSession({
+    serviceType,
+    targetHost,
+    targetHostLabel,
+    targetPort: selectedPort,
+    subdomain
+  });
 }
 
 function renderDashboard(info) {
