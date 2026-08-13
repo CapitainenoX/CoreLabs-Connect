@@ -7,7 +7,13 @@ const net = require('net');
 const { exec } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
-const BASE_DOMAIN = 'corelabs.network';
+const BASE_DOMAIN = 'tunnel.corelabs.network';
+
+function debugLog(msg, data) {
+  const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
+  if (data) console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`, data);
+  else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
+}
 
 function promptInput(question, defaultVal) {
   const rl = readline.createInterface({
@@ -23,9 +29,6 @@ function promptInput(question, defaultVal) {
   });
 }
 
-/**
- * Interactive Arrow-Key Menu Selector (↑ / ↓ to navigate, Enter to select)
- */
 function selectMenu(title, choices) {
   return new Promise((resolve) => {
     let selectedIndex = 0;
@@ -140,8 +143,9 @@ async function discoverLANDevices() {
   });
 }
 
-// Forward incoming HTTP requests from tunnel bridge down to local application
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
+  debugLog(`Requête HTTP entrante du tunnel [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
+
   const options = {
     hostname: targetHost,
     port: targetPort,
@@ -155,6 +159,7 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
     localRes.on('data', chunk => bodyChunks.push(chunk));
     localRes.on('end', () => {
       const fullBody = Buffer.concat(bodyChunks).toString('utf-8');
+      debugLog(`Réponse locale [${reqMsg.requestId}] Status: ${localRes.statusCode}`);
       sendWsMessage({
         type: 'HTTP_RESPONSE',
         requestId: reqMsg.requestId,
@@ -167,6 +172,7 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
   });
 
   localReq.on('error', (err) => {
+    debugLog(`Erreur proxying local [${reqMsg.requestId}]`, err.message);
     sendWsMessage({
       type: 'HTTP_RESPONSE',
       requestId: reqMsg.requestId,
@@ -191,7 +197,6 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
 }
 
 async function main() {
-  // 1. Service Selection Menu
   const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
     { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
     { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
@@ -199,7 +204,6 @@ async function main() {
     { label: '⚡  Autre service TCP / UDP', value: 'other' }
   ]);
 
-  // 2. Host Target Menu
   const hostOption = await selectMenu('Où se situe le service à partager ?', [
     { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
     { label: '📡  Un autre appareil du réseau local (LAN)', value: 'lan' }
@@ -222,7 +226,6 @@ async function main() {
     targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
   }
 
-  // 3. Port Selection Menu
   let portChoices = [];
   if (serviceType === 'minecraft-java') {
     portChoices = [
@@ -257,7 +260,6 @@ async function main() {
     selectedPort = parseInt(customPortStr, 10) || 3000;
   }
 
-  // 4. Subdomain Menu
   const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
   const subChoices = [
     { label: `✨  Sous-domaine auto-généré (${defaultSub}.${BASE_DOMAIN})`, value: defaultSub },
@@ -270,7 +272,6 @@ async function main() {
     subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
   }
 
-  // 5. Diagnostics & WebSocket Bridge Setup
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
   console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
@@ -287,12 +288,11 @@ async function main() {
   }
 
   console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}.${BASE_DOMAIN})...`);
-  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket avec CoreLabs Server...`);
+  console.log(`\n[3/3] ⚡ Connexion du pont WebSocket CoreLabs Server...`);
 
   let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
   if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
 
-  // Establish WebSocket tunnel bridge
   const NativeWebSocket = globalThis.WebSocket || require('ws');
   
   try {
@@ -315,7 +315,6 @@ async function main() {
         targetPort: selectedPort
       });
 
-      // Keepalive ping
       setInterval(() => {
         sendWs({ type: 'PING' });
       }, 15000);
@@ -327,20 +326,23 @@ async function main() {
 
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data || event);
+        const msgData = event.data || event;
+        const msg = JSON.parse(msgData.toString());
         if (msg.type === 'HTTP_REQUEST') {
           handleIncomingTunnelRequest(msg, targetHost, selectedPort, sendWs);
         }
-      } catch (err) {}
+      } catch (err) {
+        debugLog('Erreur lecture message WS:', err);
+      }
     };
 
     ws.onerror = (err) => {
-      // Fallback display
+      debugLog('Erreur connexion WebSocket:', err);
       renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
     };
 
   } catch (err) {
-    // Fallback if WS fails
+    debugLog('Exception connexion WS:', err);
     renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
   }
 }

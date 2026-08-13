@@ -12,7 +12,6 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
-const BASE_DOMAIN = 'corelabs.network';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -52,9 +51,10 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
+// Main Root Route for https://tunnel.corelabs.network/
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
-  const isMainDomain = host === DOMAIN || host === BASE_DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
+  const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
 
   if (isMainDomain) {
     const indexPath = path.join(publicPath, 'index.html');
@@ -73,7 +73,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Universal bash installer for Linux / macOS / GitBash
+// Linux / macOS / GitBash installer
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -94,6 +94,9 @@ else
     INSTALL_DIR="$HOME/.corelabs-tunnel"
 fi
 
+if [ -d "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR"
+fi
 mkdir -p "$INSTALL_DIR"
 
 NODE_CMD="node"
@@ -107,17 +110,6 @@ fi
 
 echo "[+] Téléchargement de la dernière version..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
-
-cat << 'EOF' > "$INSTALL_DIR/corelabs-tunnel"
-#!/usr/bin/env bash
-curl -fsSL "https://tunnel.corelabs.network/install.sh?v=$(date +%s)" | bash "$@"
-EOF
-chmod +x "$INSTALL_DIR/corelabs-tunnel"
-
-BIN_DIR="/usr/local/bin"
-if [ -w "$BIN_DIR" ]; then
-    cp "$INSTALL_DIR/corelabs-tunnel" "$BIN_DIR/corelabs-tunnel" 2>/dev/null || true
-fi
 
 CLI_FILE="$INSTALL_DIR/cli.js"
 if command -v cygpath >/dev/null 2>&1; then
@@ -135,7 +127,7 @@ app.get(['/install.ps1', '/ps1'], (req, res) => {
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
 
-  res.send(`# CoreLabs Tunnel PowerShell Installer with Permanent PATH Integration
+  res.send(`# CoreLabs Tunnel PowerShell Installer
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "          CORELABS TUNNEL INSTANT INSTALLER           " -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
@@ -182,31 +174,19 @@ $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
-# Create cmd shortcut
-$BatchFile = "$InstallDir\\corelabs-tunnel.cmd"
-$BatchContent = @"
-@echo off
-powershell -ExecutionPolicy Bypass -Command "iwr -useb https://${DOMAIN}/install.ps1 | iex" %*
-"@
-Set-Content -Path $BatchFile -Value $BatchContent -Force
-
-# Permanently add $InstallDir to User PATH environment variable
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$InstallDir*") {
-    Write-Host "[+] Ajout de 'corelabs-tunnel' au PATH système Windows..." -ForegroundColor Green
     [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
     $env:Path += ";$InstallDir"
 }
 
-Write-Host "[✓] Commande 'corelabs-tunnel' disponible !" -ForegroundColor Green
 Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
-
 & "$NodePath" "$CliPath" $args
 `);
 });
 
 wss.on('connection', (ws: WebSocket, req) => {
-  log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
+  log('INFO', `Nouvelle connexion WebSocket reçue depuis ${req.socket.remoteAddress}`);
   let assignedSubdomain: string | null = null;
 
   ws.on('message', async (data: string) => {
@@ -217,8 +197,8 @@ wss.on('connection', (ws: WebSocket, req) => {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        // Register 1st-level subdomain on Cloudflare for Instant Universal SSL
-        await cfManager.createSubdomainRecord(cleanSubdomain);
+        // Target domain format: [subdomain].tunnel.corelabs.network
+        await cfManager.createSubdomainRecord(`${cleanSubdomain}.tunnel`);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -231,9 +211,9 @@ wss.on('connection', (ws: WebSocket, req) => {
           pendingRequests: new Map()
         });
 
-        let publicUrl = `https://${cleanSubdomain}.${BASE_DOMAIN}`;
-        if (serviceType === 'minecraft') {
-          publicUrl = `${cleanSubdomain}.${BASE_DOMAIN}:25565`;
+        let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
+        if (serviceType.startsWith('minecraft')) {
+          publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
         }
 
         log('INFO', `[Tunnel Actif] Public URL: ${publicUrl} -> Cible: ${targetHost}:${targetPort}`);
@@ -242,7 +222,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           type: 'TUNNEL_READY',
           subdomain: cleanSubdomain,
           publicUrl,
-          domain: BASE_DOMAIN
+          domain: DOMAIN
         }));
       }
 
@@ -255,6 +235,8 @@ wss.on('connection', (ws: WebSocket, req) => {
           if (pending) {
             clearTimeout(pending.timeoutId);
             session.pendingRequests.delete(requestId);
+
+            log('DEBUG', `[HTTP Proxy Response] ${subdomain}.${DOMAIN} Status: ${statusCode}`);
 
             if (headers) {
               Object.keys(headers).forEach(k => {
@@ -272,13 +254,14 @@ wss.on('connection', (ws: WebSocket, req) => {
       if (msg.type === 'PONG') {}
 
     } catch (err: any) {
-      log('ERROR', 'Erreur message WS', { error: err.message });
+      log('ERROR', 'Erreur traitement WebSocket', { error: err.message, stack: err.stack });
     }
   });
 
   ws.on('close', () => {
     if (assignedSubdomain) {
       activeTunnels.delete(assignedSubdomain);
+      log('INFO', `Tunnel fermé: ${assignedSubdomain}.${DOMAIN}`);
     }
   });
 });
@@ -288,65 +271,69 @@ app.post('/api/tunnel/create', async (req, res) => {
   if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
   const cleanSubdomain = subdomain.toLowerCase();
-  await cfManager.createSubdomainRecord(cleanSubdomain);
+  await cfManager.createSubdomainRecord(`${cleanSubdomain}.tunnel`);
 
-  let publicUrl = `https://${cleanSubdomain}.${BASE_DOMAIN}`;
-  if (serviceType === 'minecraft') {
-    publicUrl = `${cleanSubdomain}.${BASE_DOMAIN}:25565`;
+  let publicUrl = `https://${cleanSubdomain}.${DOMAIN}`;
+  if (serviceType.startsWith('minecraft')) {
+    publicUrl = `${cleanSubdomain}.${DOMAIN}:25565`;
   }
 
   return res.json({
     success: true,
     subdomain: cleanSubdomain,
     publicUrl,
-    domain: BASE_DOMAIN,
+    domain: DOMAIN,
     message: `Tunnel prêt sur ${publicUrl}`
   });
 });
 
-// Wildcard HTTP Proxy Handler for 1st-level wildcard SSL subdomains (*.corelabs.network)
+// Wildcard HTTP Proxy Handler for *.tunnel.corelabs.network
 app.use((req, res, next) => {
   const host = req.headers.host || '';
-  const subdomainMatch = host.match(/^([a-z0-9-]+)\.corelabs\.network/i);
+  log('DEBUG', `Interception hôte entrant: ${host} (Path: ${req.url})`);
+
+  const subdomainMatch = host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
 
   if (subdomainMatch) {
     const sub = subdomainMatch[1].toLowerCase();
-    // Exclude tunnel.corelabs.network main domain
-    if (sub !== 'tunnel') {
-      const session = activeTunnels.get(sub);
+    log('INFO', `Requête vers sous-domaine tunnel: ${sub}.${DOMAIN}`);
 
-      if (session && session.ws.readyState === WebSocket.OPEN) {
-        const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const session = activeTunnels.get(sub);
 
-        const timeoutId = setTimeout(() => {
-          if (session.pendingRequests.has(requestId)) {
-            session.pendingRequests.delete(requestId);
-            res.status(504).send(`
-              <html>
-                <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-                  <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-                    <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
-                  </div>
-                </body>
-              </html>
-            `);
-          }
-        }, 10000);
+    if (session && session.ws.readyState === WebSocket.OPEN) {
+      const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        session.pendingRequests.set(requestId, { res, timeoutId });
+      const timeoutId = setTimeout(() => {
+        if (session.pendingRequests.has(requestId)) {
+          session.pendingRequests.delete(requestId);
+          log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}.${DOMAIN}`);
+          res.status(504).send(`
+            <html>
+              <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+                <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+                  <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
+                  <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
+                </div>
+              </body>
+            </html>
+          `);
+        }
+      }, 10000);
 
-        session.ws.send(JSON.stringify({
-          type: 'HTTP_REQUEST',
-          requestId,
-          method: req.method,
-          path: req.url,
-          headers: req.headers,
-          subdomain: sub
-        }));
+      session.pendingRequests.set(requestId, { res, timeoutId });
 
-        return;
-      }
+      session.ws.send(JSON.stringify({
+        type: 'HTTP_REQUEST',
+        requestId,
+        method: req.method,
+        path: req.url,
+        headers: req.headers,
+        subdomain: sub
+      }));
+
+      return;
+    } else {
+      log('WARN', `Sous-domaine introuvable ou session WebSocket inactive pour: ${sub}.${DOMAIN}`);
     }
   }
 
