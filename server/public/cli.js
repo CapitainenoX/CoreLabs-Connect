@@ -60,7 +60,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.5
+                     T U N N E L   v2.6
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -483,6 +483,7 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   const targetTunnel = tunnelsList.find(t => cleanSubdomainInput(t.subdomain) === cleanSub) || tunnelsList[0];
   let actualTargetHost = targetTunnel.targetHost || '127.0.0.1';
   let actualTargetPort = targetTunnel.targetPort || 80;
+  let targetSubfolder = targetTunnel.targetSubfolder || '';
 
   if (targetTunnel.autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
     const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
@@ -490,7 +491,16 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       actualTargetHost = lanMatch[1].replace(/-/g, '.');
       actualTargetPort = parseInt(lanMatch[2], 10) || 80;
       reqPath = lanMatch[3] || '/';
+      targetSubfolder = '';
       debugLog(`[LAN Sub-Tunnel Triggered] Route vers appareil LAN -> ${actualTargetHost}:${actualTargetPort}${reqPath}`);
+    }
+  }
+
+  // Prepend target subfolder if configured and not already included in path
+  if (targetSubfolder) {
+    const cleanFolder = targetSubfolder.startsWith('/') ? targetSubfolder : `/${targetSubfolder}`;
+    if (!reqPath.startsWith(cleanFolder)) {
+      reqPath = `${cleanFolder}${reqPath.startsWith('/') ? '' : '/'}${reqPath}`;
     }
   }
 
@@ -778,6 +788,9 @@ async function main() {
       const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, '80');
       const targetPort = parseInt(portStr, 10) || 80;
 
+      renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOSSIER XAMPP/WAMP (${count})`);
+      const subfolderStr = await promptInput(`Si votre site est dans un sous-dossier XAMPP (ex: /koogle), indiquez-le`, '', `ÉTAPE 3/4 — SOUS-DOSSIER (${count})`);
+
       renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOMAINE DÉDIÉ (${count})`);
       const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
       let rawSubdomain = await promptInput(`Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
@@ -788,6 +801,7 @@ async function main() {
         targetHost,
         targetHostLabel,
         targetPort,
+        targetSubfolder: subfolderStr,
         subdomain,
         publicUrl: `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
         autoSubTunnels: true
@@ -820,12 +834,19 @@ async function main() {
       targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
     }
 
-    renderAsciiBanner('ÉTAPE 3/4 — PORT & NOM DE L\'URL');
+    renderAsciiBanner('ÉTAPE 3/4 — PORT DU SERVICE');
     let defaultPort = '80';
     if (serviceTypeChoice.startsWith('minecraft')) defaultPort = '25565';
     const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, defaultPort);
     const targetPort = parseInt(portStr, 10) || parseInt(defaultPort, 10);
 
+    renderAsciiBanner('ÉTAPE 3/4 — SOUS-DOSSIER XAMPP/WAMP (OPTIONNEL)');
+    let targetSubfolder = '';
+    if (serviceTypeChoice === 'web') {
+      targetSubfolder = await promptInput(`Si votre site est dans un sous-dossier (ex: /koogle), indiquez-le (Entrée pour aucun)`, '');
+    }
+
+    renderAsciiBanner('ÉTAPE 3/4 — NOM DE L\'URL PUBLIC');
     const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
     let rawSubdomain = await promptInput(`Nom de votre sous-domaine public ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
     let subdomain = cleanSubdomainInput(rawSubdomain);
@@ -835,6 +856,7 @@ async function main() {
       targetHost,
       targetHostLabel,
       targetPort,
+      targetSubfolder,
       subdomain,
       publicUrl: serviceTypeChoice.startsWith('minecraft') ? `${subdomain}-tunnel.${BASE_DOMAIN}:25565` : `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
       autoSubTunnels: true
@@ -870,7 +892,8 @@ function renderMultiDashboard(info) {
 
     info.tunnels.forEach((t, idx) => {
       const statusStr = t.isPortActive !== false ? '\x1b[32m● ONLINE\x1b[0m' : '\x1b[33m● EN ATTENTE\x1b[0m';
-      console.log(`  [${idx + 1}] ${statusStr}  \x1b[36m\x1b[1m${t.publicUrl.padEnd(42)}\x1b[0m -> \x1b[37m${t.targetHostLabel || t.targetHost}:${t.targetPort}\x1b[0m`);
+      const subFolderNote = t.targetSubfolder ? ` \x1b[90m(${t.targetSubfolder})\x1b[0m` : '';
+      console.log(`  [${idx + 1}] ${statusStr}  \x1b[36m\x1b[1m${t.publicUrl.padEnd(42)}\x1b[0m -> \x1b[37m${t.targetHostLabel || t.targetHost}:${t.targetPort}${subFolderNote}\x1b[0m`);
     });
 
     console.log('----------------------------------------------------------------------------');
