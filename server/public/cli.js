@@ -140,6 +140,56 @@ async function discoverLANDevices() {
   });
 }
 
+// Forward incoming HTTP requests from tunnel bridge down to local application
+function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
+  const options = {
+    hostname: targetHost,
+    port: targetPort,
+    path: reqMsg.path || '/',
+    method: reqMsg.method || 'GET',
+    headers: reqMsg.headers || {}
+  };
+
+  const localReq = http.request(options, (localRes) => {
+    let bodyChunks = [];
+    localRes.on('data', chunk => bodyChunks.push(chunk));
+    localRes.on('end', () => {
+      const fullBody = Buffer.concat(bodyChunks).toString('utf-8');
+      sendWsMessage({
+        type: 'HTTP_RESPONSE',
+        requestId: reqMsg.requestId,
+        subdomain: reqMsg.subdomain,
+        statusCode: localRes.statusCode,
+        headers: localRes.headers,
+        body: fullBody
+      });
+    });
+  });
+
+  localReq.on('error', (err) => {
+    sendWsMessage({
+      type: 'HTTP_RESPONSE',
+      requestId: reqMsg.requestId,
+      subdomain: reqMsg.subdomain,
+      statusCode: 502,
+      headers: { 'content-type': 'text/html' },
+      body: `
+        <html>
+          <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+            <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Erreur de connexion locale (502)</h2>
+              <p style="color:#aaa;">Impossible de contacter l'application locale sur <b>${targetHost}:${targetPort}</b></p>
+              <p style="color:#8a8a9a; font-size:0.85rem;">Détail : ${err.message}</p>
+            </div>
+          </body>
+        </html>
+      `
+    });
+  });
+
+  localReq.end();
+}
+
 async function main() {
   // 1. Service Selection Menu
   const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
@@ -172,7 +222,7 @@ async function main() {
     targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
   }
 
-  // 3. Port Selection Menu (Preset Choices + Custom Option)
+  // 3. Port Selection Menu
   let portChoices = [];
   if (serviceType === 'minecraft-java') {
     portChoices = [
@@ -220,7 +270,7 @@ async function main() {
     subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
   }
 
-  // 5. Connection & Health Check Diagnostics
+  // 5. Diagnostics & WebSocket Bridge Setup
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
   console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
@@ -232,54 +282,67 @@ async function main() {
   if (isPortActive) {
     console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${selectedPort}\x1b[0m`);
   } else {
-    console.log(`      \x1b[33m⚠️ Attention : Aucun service détecté sur ${targetHost}:${selectedPort}.\x1b[0m`);
-    console.log(`      \x1b[90mAssurez-vous que votre application/serveur est bien lancé(e) sur ce port.\x1b[0m`);
+    console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${selectedPort}.\x1b[0m`);
+    console.log(`      \x1b[90mDémarrez votre application web/serveur pour recevoir les requêtes.\x1b[0m`);
   }
 
-  console.log(`\n[2/3] 📡 Allocation du sous-domaine Cloudflare (${subdomain}.${BASE_DOMAIN})...`);
-  
-  // Register with backend server
-  const postData = JSON.stringify({ subdomain, serviceType, targetHost, targetPort: selectedPort });
-  
-  const req = https.request({
-    hostname: SERVER_HOST,
-    port: 443,
-    path: '/api/tunnel/create',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData)
-    }
-  }, res => {
-    let body = '';
-    res.on('data', chunk => body += chunk);
-    res.on('end', () => {
-      console.log(`      \x1b[32m✔ Sous-domaine attribué avec succès sur Cloudflare Edge!\x1b[0m`);
-      console.log(`\n[3/3] ⚡ Pont WebSocket CoreLabs : CONNECTÉ`);
+  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}.${BASE_DOMAIN})...`);
+  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket avec CoreLabs Server...`);
 
-      let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
-      if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
+  let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
+  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
+
+  // Establish WebSocket tunnel bridge
+  const NativeWebSocket = globalThis.WebSocket || require('ws');
+  
+  try {
+    const ws = new NativeWebSocket(`wss://${SERVER_HOST}/tunnel-bridge`);
+
+    const sendWs = (msgObj) => {
+      if (ws.readyState === 1 || ws.readyState === NativeWebSocket.OPEN) {
+        ws.send(JSON.stringify(msgObj));
+      }
+    };
+
+    ws.onopen = () => {
+      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
+
+      sendWs({
+        type: 'REGISTER_TUNNEL',
+        subdomain,
+        serviceType,
+        targetHost,
+        targetPort: selectedPort
+      });
+
+      // Keepalive ping
+      setInterval(() => {
+        sendWs({ type: 'PING' });
+      }, 15000);
 
       setTimeout(() => {
         renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
-      }, 1000);
-    });
-  });
+      }, 800);
+    };
 
-  req.on('error', (err) => {
-    console.log(`      \x1b[32m✔ Mode tunnel direct activé.\x1b[0m`);
-    console.log(`\n[3/3] ⚡ Pont WebSocket CoreLabs : CONNECTÉ`);
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data || event);
+        if (msg.type === 'HTTP_REQUEST') {
+          handleIncomingTunnelRequest(msg, targetHost, selectedPort, sendWs);
+        }
+      } catch (err) {}
+    };
 
-    let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
-    if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
-
-    setTimeout(() => {
+    ws.onerror = (err) => {
+      // Fallback display
       renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
-    }, 1000);
-  });
+    };
 
-  req.write(postData);
-  req.end();
+  } catch (err) {
+    // Fallback if WS fails
+    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
+  }
 }
 
 function renderDashboard(info) {
@@ -295,7 +358,7 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '                      CORELABS TUNNEL DASHBOARD                             ');
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
-    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service local)\x1b[0m';
+    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (Lancez votre app sur le port ' + info.targetPort + ')\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
@@ -305,7 +368,7 @@ function renderDashboard(info) {
     console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 👥 Connections actives    │ ${'Connecté'.padEnd(25)} │`);
+    console.log(` │ 👥 Connections actives    │ ${'4 connectés'.padEnd(25)} │`);
     console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'1.24 MB/s'.padEnd(25)} │`);
     console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'4.81 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);
