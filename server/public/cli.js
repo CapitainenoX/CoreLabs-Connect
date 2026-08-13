@@ -131,14 +131,18 @@ function applyLiveHotUpdate() {
 }
 
 function promptInput(question, defaultVal) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
   return new Promise(resolve => {
+    if (process.stdin.isPaused()) process.stdin.resume();
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
     const qText = defaultVal ? `${question} (${defaultVal}) : ` : `${question} : `;
     rl.question(qText, answer => {
       rl.close();
+      if (process.stdin.isPaused()) process.stdin.resume();
       resolve(answer.trim() || defaultVal);
     });
   });
@@ -147,6 +151,10 @@ function promptInput(question, defaultVal) {
 function selectMenu(title, choices) {
   return new Promise((resolve) => {
     let selectedIndex = 0;
+
+    if (process.stdin.isPaused()) {
+      process.stdin.resume();
+    }
 
     function render() {
       console.clear();
@@ -170,6 +178,8 @@ function selectMenu(title, choices) {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
     function onKeypress(_, key) {
+      if (!key) return;
+
       if (key.ctrl && key.name === 'c') {
         process.exit(0);
       }
@@ -369,7 +379,7 @@ async function discoverLANDevices() {
             if (ip !== '127.0.0.1' && !ip.startsWith('224.') && !ip.endsWith('.255')) {
               let name = `Appareil LAN (${ip})`;
               if (ip.endsWith('.1')) name = 'Routeur / Box Internet';
-              else if (ip === localIP) name = 'Cette Machine (${os.hostname()})';
+              else if (ip === localIP) name = `Cette Machine (${os.hostname()})`;
               devices.push({ ip, name });
             }
           }
@@ -538,7 +548,6 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   localReq.end();
 }
 
-// Resilient WebSocket Client with Exponential Backoff Auto-Reconnection Engine
 async function startMultiTunnelSession(sessionConfig) {
   const { tunnels, autoStart } = sessionConfig;
   saveActiveSession(sessionConfig);
@@ -580,7 +589,7 @@ async function startMultiTunnelSession(sessionConfig) {
 
       ws.onopen = () => {
         console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
-        retryDelay = 1000; // Reset retry backoff on clean connection
+        retryDelay = 1000;
         isReconnecting = false;
 
         sendWs({
@@ -676,7 +685,7 @@ async function startMultiTunnelSession(sessionConfig) {
     isReconnecting = true;
     console.log(`\n\x1b[33m⚡ Connexion au pont perdue. Reconnexion automatique dans ${retryDelay / 1000}s...\x1b[0m`);
     setTimeout(() => {
-      retryDelay = Math.min(retryDelay * 2, 15000); // Exponential backoff max 15s
+      retryDelay = Math.min(retryDelay * 2, 15000);
       connectBridge();
     }, retryDelay);
   }
