@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '2.0.0';
+const SERVER_VERSION = '2.1.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -87,7 +87,7 @@ function renderPremiumErrorPage(title: string, subtitle: string, message: string
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${code} - ${title} | CoreLabs Tunnel Security</title>
+  <title>${code} - ${title} | CoreLabs Tunnel</title>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
@@ -106,7 +106,7 @@ function renderPremiumErrorPage(title: string, subtitle: string, message: string
       position: absolute;
       width: 600px;
       height: 600px;
-      background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(168, 85, 247, 0.08) 40%, rgba(0,0,0,0) 70%);
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.18) 0%, rgba(168, 85, 247, 0.08) 40%, rgba(0,0,0,0) 70%);
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
@@ -213,13 +213,13 @@ function renderPremiumErrorPage(title: string, subtitle: string, message: string
     <div class="info-box">
       <div>🔒 <b>Sécurité :</b> Chiffrement AES-256-GCM</div>
       <div>⚡ <b>Moteur :</b> CoreLabs Tunnel v${SERVER_VERSION}</div>
-      <div>📡 <b>Statut :</b> En attente du client CLI local</div>
+      <div>📂 <b>Routage :</b> Support XAMPP / WAMP & Sous-Dossiers</div>
     </div>
 
     <a href="https://${DOMAIN}" class="btn">Consulter CoreLabs Network</a>
 
     <div class="footer">
-      CoreLabs Tunnel Security Engine &bull; Transport Sécurisé de Bout en Bout
+      CoreLabs Tunnel Engine &bull; Support Sous-Dossiers & XAMPP Intégré
     </div>
   </div>
 </body>
@@ -277,7 +277,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & TARGETED ROUTER WITH CUSTOM 404 PAGE
+// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL, XAMPP SUBFOLDER & DEEP ROUTER
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -301,8 +301,8 @@ app.use((req, res, next) => {
             log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${requestPath}`);
             res.status(504).send(renderPremiumErrorPage(
               'Gateway Timeout',
-              'Service Indisponible (504)',
-              `L'application locale sur ${session.targetHost}:${session.targetPort} n'a pas répondu à la page <b>${requestPath}</b>.`,
+              'Service Inaccessible (504)',
+              `L'application sur ${session.targetHost}:${session.targetPort} n'a pas répondu à la sous-page <b>${requestPath}</b>.`,
               504
             ));
           }
@@ -313,6 +313,7 @@ app.use((req, res, next) => {
         const forwardedHeaders = Object.assign({}, req.headers);
         forwardedHeaders['x-forwarded-host'] = host;
         forwardedHeaders['x-forwarded-proto'] = 'https';
+        forwardedHeaders['x-forwarded-server'] = host;
 
         const rawBodyBuf: Buffer = (req as any).rawBody;
         const requestBodyB64 = rawBodyBuf && rawBodyBuf.length > 0 ? rawBodyBuf.toString('base64') : '';
@@ -345,7 +346,7 @@ app.use((req, res, next) => {
         return res.status(404).send(renderPremiumErrorPage(
           'Page Inaccessible',
           'Tunnel Non Connecté',
-          `Le tunnel <b>${sub}-tunnel.${BASE_DOMAIN}</b> n'est pas connecté. Lancez la commande <code>corelabs-tunnel</code> sur votre machine.`,
+          `Le tunnel <b>${sub}-tunnel.${BASE_DOMAIN}</b> n'est actuellement pas connecté.`,
           404
         ));
       }
@@ -497,7 +498,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 `);
 });
 
-// WEBSOCKET BRIDGE WITH AES-256-GCM DECRYPTION
+// WEBSOCKET BRIDGE
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   const registeredSubdomains: string[] = [];
@@ -506,7 +507,6 @@ wss.on('connection', (ws: WebSocket, req) => {
     try {
       let msg = JSON.parse(data.toString());
 
-      // If frame is encrypted with AES-256-GCM
       if (msg.type === 'ENCRYPTED_FRAME' && msg.data) {
         const anySub = registeredSubdomains[0];
         const session = anySub ? activeTunnels.get(anySub) : null;
