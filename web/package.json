@@ -1,0 +1,13 @@
+{
+  "name": "@corelabs/tunnel-web",
+  "version": "1.0.0",
+  "description": "CoreLabs Tunnel Minimalist Dark Landing Page",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

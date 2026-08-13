@@ -1,0 +1,39 @@
+{
+  "name": "@corelabs/tunnel-cli",
+  "version": "1.0.0",
+  "description": "CoreLabs Tunnel CLI - Ultra fast zero-config tunnel for Web, Minecraft & TCP/UDP",
+  "main": "dist/index.js",
+  "bin": {
+    "corelabs-tunnel": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "cli-cursor": "^3.1.0",
+    "cli-progress": "^3.12.0",
+    "commander": "^11.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "figlet": "^1.7.0",
+    "inquirer": "^8.2.5",
+    "node-fetch": "^2.7.0",
+    "ora": "^5.4.1",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/figlet": "^1.5.8",
+    "@types/inquirer": "^8.2.10",
+    "@types/node": "^20.10.0",
+    "@types/node-fetch": "^2.6.9",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.2"
+  }
+}

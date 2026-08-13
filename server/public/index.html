@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoreLabs Tunnel — Le tunnel ultra performant pour Web & Minecraft</title>
+  <meta name="description" content="Solution de tunnel zéro-config ultra rapide pour exposer vos sites web, serveurs Minecraft et services TCP/UDP au monde entier via *.tunnel.corelabs.network.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-container">
+      <div class="logo-box">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">CoreLabs</span>
+        <span class="logo-badge">Tunnel</span>
+      </div>
+      <nav class="nav-links">
+        <a href="#features">Fonctionnalités</a>
+        <a href="#demo">Démo CLI</a>
+        <a href="#cf-guide">Guide Cloudflare</a>
+        <a href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <div class="nav-actions">
+        <button class="btn-download" onclick="scrollToInstall()">
+          <span>↓</span> Télécharger
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero-section">
+    <div class="hero-container">
+
+      <div class="announcement-pill">
+        <span class="pill-tag">Nouveau</span>
+        <span class="pill-text">Découvrez CoreLabs Tunnel v1.0. Support réseau local (LAN) et Cloudflare Edge.</span>
+      </div>
+
+      <h1 class="hero-title">Le tunnel ultra performant<br>pour Web & Minecraft</h1>
+
+      <p class="hero-description">
+        Partagez vos serveurs Minecraft, sites web et API en une seconde sans ouvrir de ports sur votre box.
+        Interface terminal épurée avec sous-domaines sur <code class="highlight-code">tunnel.corelabs.network</code>.
+      </p>
+
+      <!-- Code Installer Snippet Container (OpenCode Style) -->
+      <div class="code-snippet-box" id="installer">
+        <div class="snippet-tabs">
+          <button class="tab-btn active" data-tab="curl">curl</button>
+          <button class="tab-btn" data-tab="powershell">powershell</button>
+          <button class="tab-btn" data-tab="npm">npm</button>
+          <button class="tab-btn" data-tab="bun">bun</button>
+          <button class="tab-btn" data-tab="brew">brew</button>
+        </div>
+        <div class="snippet-content">
+          <code id="command-code">curl -fsSL https://tunnel.corelabs.network/install.sh | bash</code>
+          <button class="btn-copy" id="copy-btn" title="Copier dans le presse-papier">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p class="snippet-subtext">Lancement instantané en une ligne. Aucune dépendance préalable requise.</p>
+
+    </div>
+  </section>
+
+  <!-- Interactive Terminal Simulator Section -->
+  <section class="demo-section" id="demo">
+    <div class="demo-container">
+      <div class="section-header">
+        <h2>Interface Terminal Épurée & Statistiques en Direct</h2>
+        <p>Détection automatique des appareils du réseau local (LAN) et tableau de bord de transfert style Playit.gg.</p>
+      </div>
+
+      <div class="terminal-window">
+        <div class="terminal-header">
+          <div class="window-controls">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <div class="window-title">bash — corelabs-tunnel</div>
+          <div class="status-indicator">
+            <span class="pulse-dot"></span> EN LIGNE
+          </div>
+        </div>
+
+        <div class="terminal-body" id="terminal-screen">
+          <div class="t-line prompt-line">$ corelabs-tunnel</div>
+          <div class="t-line cyan">======================================================</div>
+          <div class="t-line cyan bold">          CORELABS TUNNEL — Quick Setup Wizard        </div>
+          <div class="t-line cyan">======================================================</div>
+          <div class="t-line"></div>
+          <div class="t-line">? Quel type de service souhaitez-vous exposer ?</div>
+          <div class="t-line green">  ❯ 🎮 Serveur Minecraft (TCP/UDP - Port 25565)</div>
+          <div class="t-line"></div>
+          <div class="t-line">? Où se situe le service à partager ?</div>
+          <div class="t-line">  ❯ 📡 Un autre appareil du réseau local (LAN)</div>
+          <div class="t-line gray">    Analyses ARP & mDNS du réseau local...</div>
+          <div class="t-line green">    ✔ 🖥️  192.168.1.42 — PC-Minecraft-Rig (Détecté)</div>
+          <div class="t-line"></div>
+          <div class="t-line">? Choisissez votre sous-domaine (*.tunnel.corelabs.network) :</div>
+          <div class="t-line yellow">  ❯ play-mc.tunnel.corelabs.network</div>
+          <div class="t-line"></div>
+          <div class="t-line green bold">✔ Sous-domaine attribué ! Initialisation du tableau de bord...</div>
+          <div class="t-line">------------------------------------------------------------------</div>
+          <div class="t-line bg-status"> STATUS: ● ONLINE | PUBLIC: play-mc.tunnel.corelabs.network:25565 </div>
+          <div class="t-line"> ⏱️ Activité: 00:14:28 | 👥 Connectés: 8 joueurs | ⬆️ UL: 4.2 MB/s</div>
+          <div class="t-line green"> Charge Bande Passante: [████████████████░░░░░░] 68%</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Grid -->
+  <section class="features-section" id="features">
+    <div class="features-container">
+      <div class="feature-card">
+        <div class="feature-icon">🎮</div>
+        <h3>Optimisé Serveur Minecraft</h3>
+        <p>Support complet des protocoles TCP/UDP avec compression de paquets et latence minimale pour les serveurs Minecraft Java et Bedrock.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🌐</div>
+        <h3>Sites Web & WebSockets</h3>
+        <p>Proxy HTTPS automatique via Cloudflare avec certificats SSL/TLS valides et support natif des WebSockets et streaming.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <h3>Scan Réseau Local (LAN)</h3>
+        <p>Détectez automatiquement les autres ordinateurs, NAS ou serveurs de votre réseau local avec leurs noms d'hôtes IP pour les exposer sans config.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cloudflare Setup Guide Section -->
+  <section class="guide-section" id="cf-guide">
+    <div class="guide-container">
+      <div class="section-header">
+        <h2>Guide de Configuration Cloudflare & Domaine</h2>
+        <p>Comment associer votre domaine <code>tunnel.corelabs.network</code> avec Cloudflare Tunnels.</p>
+      </div>
+
+      <div class="guide-steps">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <div class="step-info">
+            <h4>Ajouter le domaine dans Cloudflare</h4>
+            <p>Ajoutez votre nom de domaine sur votre compte Cloudflare et pointez vos serveurs de noms (NS) vers Cloudflare.</p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <div class="step-info">
+            <h4>Créer un enregistrement DNS Wildcard</h4>
+            <p>Dans la zone DNS Cloudflare, créez un enregistrement <code>CNAME</code> wildcard : Nom <code>*</code> vers la cible du serveur de tunnel CoreLabs.</p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <div class="step-info">
+            <h4>Token API & Cloudflare Tunnel Token</h4>
+            <p>Générez un Token API Cloudflare avec l'autorisation <code>Zone.DNS:Edit</code> et renseignez les variables d'environnement dans le serveur backend :</p>
+            <pre><code>CLOUDFLARE_API_TOKEN="votre_token"
+CLOUDFLARE_ZONE_ID="votre_zone_id"
+DOMAIN_NAME="tunnel.corelabs.network"</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-container">
+      <p>© 2026 CoreLabs Network. Développé avec passion pour les développeurs et les gamers.</p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
