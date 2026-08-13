@@ -7,10 +7,12 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const vm = require('vm');
 const { exec, spawn } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
+let lastHotUpdate = null;
 
 function debugLog(msg, data) {
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
@@ -52,51 +54,44 @@ function loadActiveSession() {
   return null;
 }
 
-function autoUpdateAndRestart() {
-  console.log('\n\x1b[33m⚡ MISE À JOUR CLIENT DÉTECTÉE !\x1b[0m');
-  console.log('\x1b[36m[+] Téléchargement de la dernière version du CLI depuis CoreLabs Server...\x1b[0m');
-
-  const installDir = getInstallDir();
-  const currentCliPath = path.join(installDir, 'cli.js');
-  const tmpCliPath = path.join(installDir, 'cli.js.tmp');
+// Zero-Restart Live Hot-Reload Engine
+function applyLiveHotUpdate() {
   const timestamp = Date.now();
-
-  const fileStream = fs.createWriteStream(tmpCliPath);
-  const req = https.get(`https://${SERVER_HOST}/cli.js?v=${timestamp}`, (res) => {
-    res.pipe(fileStream);
-    fileStream.on('finish', () => {
-      fileStream.close(() => {
-        console.log('\x1b[32m✔ Mise à jour téléchargée avec succès !\x1b[0m');
-        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel...\x1b[0m\n');
-
-        if (process.platform === 'win32') {
-          const cmdStr = `timeout /t 1 /nobreak >nul & move /y "${tmpCliPath}" "${currentCliPath}" & node "${currentCliPath}" --auto-resume`;
-          const updater = spawn('cmd.exe', ['/c', cmdStr], {
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: false
-          });
-          updater.unref();
-        } else {
-          try {
-            fs.renameSync(tmpCliPath, currentCliPath);
-          } catch (e) {
-            fs.copyFileSync(tmpCliPath, currentCliPath);
-          }
-          const child = spawn(process.argv[0], [currentCliPath, '--auto-resume'], {
-            detached: true,
-            stdio: 'inherit'
-          });
-          child.unref();
-        }
-
-        process.exit(0);
-      });
+  const updateUrl = `https://${SERVER_HOST}/cli.js?v=${timestamp}`;
+  
+  https.get(updateUrl, (res) => {
+    let newCodeStr = '';
+    res.on('data', chunk => newCodeStr += chunk);
+    res.on('end', () => {
+      try {
+        const installDir = getInstallDir();
+        const currentCliPath = path.join(installDir, 'cli.js');
+        
+        // Save to disk safely
+        fs.writeFileSync(currentCliPath, newCodeStr, 'utf-8');
+        
+        // Compile and evaluate updated functions directly in-memory (Hot Swap)
+        const script = new vm.Script(newCodeStr, { filename: 'cli.js' });
+        const context = vm.createContext(Object.assign({}, global, {
+          require,
+          process,
+          console,
+          Buffer,
+          setTimeout,
+          setInterval,
+          clearTimeout,
+          clearInterval
+        }));
+        
+        script.runInContext(context);
+        lastHotUpdate = new Date().toLocaleTimeString('fr-FR');
+        debugLog(`[HOT-RELOAD] Code mis à jour en direct à ${lastHotUpdate} sans redémarrage du processus !`);
+      } catch (err) {
+        debugLog('Erreur Hot-Reload en mémoire:', err.message);
+      }
     });
-  });
-
-  req.on('error', (err) => {
-    debugLog('Erreur lors du téléchargement de la mise à jour:', err.message);
+  }).on('error', (err) => {
+    debugLog('Erreur réseau Hot-Reload:', err.message);
   });
 }
 
@@ -388,7 +383,6 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page, Remote LAN PC & Link Rewriting Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTunnels, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -397,7 +391,6 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
   let actualTargetHost = defaultHost;
   let actualTargetPort = defaultPort;
 
-  // LAN Sub-Tunnel Dynamic Route Parser: /lan/192-168-1-50/8080/path...
   if (autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
     const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
     if (lanMatch) {
@@ -431,7 +424,6 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
       const headers = Object.assign({}, localRes.headers);
 
-      // Rewrite 301/302 Location header on client CLI for remote LAN PCs (e.g. 192.168.1.38)
       if (headers.location && typeof headers.location === 'string') {
         const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         headers.location = headers.location
@@ -442,7 +434,6 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
 
-        // Main target host rewriting for remote PC (192.168.1.38 or localhost)
         const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         htmlStr = htmlStr
           .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
@@ -452,7 +443,6 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
           .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
           .replace(/http:\/\/localhost/g, `https://${publicHost}`);
 
-        // Automatic LAN IP Sub-Tunnel link rewriting
         if (autoSubTunnels !== false) {
           const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/g;
           htmlStr = htmlStr.replace(lanIpRegex, (_, ip, port) => {
@@ -516,7 +506,6 @@ async function startTunnelSession(config) {
   const { serviceType, targetHost, targetHostLabel, targetPort, subdomain, autoSubTunnels } = config;
   const enableSubTunnels = autoSubTunnels !== false;
 
-  // Save session configuration for seamless auto-resume after updates
   saveActiveSession(Object.assign({}, config, { autoSubTunnels: enableSubTunnels }));
 
   console.clear();
@@ -573,8 +562,9 @@ async function startTunnelSession(config) {
         const msgData = event.data || event;
         const msg = JSON.parse(msgData.toString());
 
+        // Zero-Restart Live Hot-Reload Trigger
         if (msg.type === 'UPDATE_CLIENT') {
-          autoUpdateAndRestart();
+          applyLiveHotUpdate();
           return;
         }
 
@@ -734,11 +724,13 @@ function renderDashboard(info) {
 
     const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service sur le port ' + info.targetPort + ')\x1b[0m';
     const subTunnelStatus = info.autoSubTunnels !== false ? '\x1b[32m● ACTIVÉ (Sub-tunnels LAN automatiques /lan/...)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
+    const hotReloadStatus = lastHotUpdate ? `\x1b[32m● MIS À JOUR EN DIRECT À ${lastHotUpdate} (ZERO REDÉMARRAGE)\x1b[0m` : '\x1b[36m● PRÊT (Zéro Redémarrage Requis)\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
     console.log(` \x1b[45m\x1b[37m DESTINATION \x1b[0m \x1b[37m${info.targetHostLabel}:${info.targetPort}\x1b[0m`);
     console.log(` \x1b[43m\x1b[30m LAN SUB-TUNNELS \x1b[0m ${subTunnelStatus}`);
+    console.log(` \x1b[44m\x1b[37m HOT RELOAD \x1b[0m ${hotReloadStatus}`);
     console.log('\n----------------------------------------------------------------------------');
 
     console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
