@@ -30,8 +30,6 @@ function saveActiveSession(sessionInfo) {
     const dir = getInstallDir();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const sessionPath = path.join(dir, 'active-session.json');
-    
-    // Ensure autoSubTunnels defaults to true if undefined
     const finalSession = Object.assign({ autoSubTunnels: true }, sessionInfo);
     fs.writeFileSync(sessionPath, JSON.stringify(finalSession, null, 2));
   } catch (err) {
@@ -58,20 +56,40 @@ function autoUpdateAndRestart() {
   console.log('\n\x1b[33m⚡ MISE À JOUR CLIENT DÉTECTÉE !\x1b[0m');
   console.log('\x1b[36m[+] Téléchargement de la dernière version du CLI depuis CoreLabs Server...\x1b[0m');
 
-  const fileStream = fs.createWriteStream(__filename);
+  const installDir = getInstallDir();
+  const currentCliPath = path.join(installDir, 'cli.js');
+  const tmpCliPath = path.join(installDir, 'cli.js.tmp');
   const timestamp = Date.now();
+
+  const fileStream = fs.createWriteStream(tmpCliPath);
   const req = https.get(`https://${SERVER_HOST}/cli.js?v=${timestamp}`, (res) => {
     res.pipe(fileStream);
     fileStream.on('finish', () => {
       fileStream.close(() => {
-        console.log('\x1b[32m✔ Mise à jour appliquée avec succès !\x1b[0m');
-        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel (LAN Sub-Tunnels ACTIVÉ par défaut)...\x1b[0m\n');
-        
-        const child = spawn(process.argv[0], [__filename, '--auto-resume'], {
-          detached: true,
-          stdio: 'inherit'
-        });
-        child.unref();
+        console.log('\x1b[32m✔ Mise à jour téléchargée avec succès !\x1b[0m');
+        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel...\x1b[0m\n');
+
+        if (process.platform === 'win32') {
+          const cmdStr = `timeout /t 1 /nobreak >nul & move /y "${tmpCliPath}" "${currentCliPath}" & node "${currentCliPath}" --auto-resume`;
+          const updater = spawn('cmd.exe', ['/c', cmdStr], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: false
+          });
+          updater.unref();
+        } else {
+          try {
+            fs.renameSync(tmpCliPath, currentCliPath);
+          } catch (e) {
+            fs.copyFileSync(tmpCliPath, currentCliPath);
+          }
+          const child = spawn(process.argv[0], [currentCliPath, '--auto-resume'], {
+            detached: true,
+            stdio: 'inherit'
+          });
+          child.unref();
+        }
+
         process.exit(0);
       });
     });
@@ -370,7 +388,7 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page, Dynamic Link Rewriting & LAN Sub-Tunnel Proxy Handler
+// Multi-Page, Remote LAN PC & Link Rewriting Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTunnels, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -379,7 +397,7 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
   let actualTargetHost = defaultHost;
   let actualTargetPort = defaultPort;
 
-  // Dynamic LAN Sub-Tunnel Path Parser: /lan/192-168-1-50/8080/path...
+  // LAN Sub-Tunnel Dynamic Route Parser: /lan/192-168-1-50/8080/path...
   if (autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
     const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
     if (lanMatch) {
@@ -411,19 +429,30 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
     localRes.on('end', () => {
       let fullBuffer = Buffer.concat(bodyChunks);
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
+      const headers = Object.assign({}, localRes.headers);
+
+      // Rewrite 301/302 Location header on client CLI for remote LAN PCs (e.g. 192.168.1.38)
+      if (headers.location && typeof headers.location === 'string') {
+        const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
+        headers.location = headers.location
+          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
+          .replace(/http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+      }
 
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
 
-        // Main target host rewriting
+        // Main target host rewriting for remote PC (192.168.1.38 or localhost)
+        const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         htmlStr = htmlStr
+          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'g'), `https://${publicHost}`)
           .replace(new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/${actualTargetHost}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
           .replace(/http:\/\/localhost/g, `https://${publicHost}`);
 
-        // Automatic LAN IP Sub-Tunnel link rewriting (e.g. http://192.168.1.50:8080 -> /lan/192-168-1-50/8080)
+        // Automatic LAN IP Sub-Tunnel link rewriting
         if (autoSubTunnels !== false) {
           const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/g;
           htmlStr = htmlStr.replace(lanIpRegex, (_, ip, port) => {
@@ -445,7 +474,7 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
         requestId: reqMsg.requestId,
         subdomain: reqMsg.subdomain,
         statusCode: localRes.statusCode,
-        headers: localRes.headers,
+        headers,
         body: b64Data,
         isBase64: true
       });
@@ -453,7 +482,7 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
   });
 
   localReq.on('error', (err) => {
-    debugLog(`Erreur page locale [${reqMsg.requestId}] Path: ${reqPath}`, err.message);
+    debugLog(`Erreur page locale [${reqMsg.requestId}] Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath}`, err.message);
     sendWsMessage({
       type: 'HTTP_RESPONSE',
       requestId: reqMsg.requestId,
@@ -464,8 +493,9 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
         <html>
           <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
             <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Appareil/Page Inaccessible (502)</h2>
-              <p style="color:#aaa;">Impossible de contacter le service local sur <b>${actualTargetHost}:${actualTargetPort}</b> pour le chemin <b>${reqPath}</b></p>
+              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Appareil Distant Inaccessible (502)</h2>
+              <p style="color:#aaa;">Impossible de contacter le service local sur l'appareil distant <b>${actualTargetHost}:${actualTargetPort}</b> pour le chemin <b>${reqPath}</b></p>
+              <p style="color:#666; font-size:0.85rem;">Vérifiez que le PC distant ${actualTargetHost} est allumé et écoute bien sur le port ${actualTargetPort}.</p>
             </div>
           </body>
         </html>
@@ -661,7 +691,6 @@ async function main() {
     selectedPort = parseInt(customPortStr, 10) || 80;
   }
 
-  // Toggle for LAN Sub-Tunnels Dynamic Auto-Routing
   const subTunnelChoices = [
     { label: '⚡  [✓] ACTIVÉ — Sous-tunnels LAN automatiques (/lan/ip/port/...) [Recommandé par défaut]', value: true },
     { label: '🔒  [ ] DÉSACTIVÉ — Ne cibler uniquement que le port et la machine choisie', value: false }

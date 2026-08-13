@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.6.0';
+const SERVER_VERSION = '1.7.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -107,7 +107,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-PAGE & LAN SUB-TUNNEL HTTP PROXY
+// 1. WILDCARD SUBDOMAIN MULTI-PAGE & REMOTE LAN PC HTTP PROXY
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -361,7 +361,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Public URL: ${publicUrl} (AutoSubTunnels: ${autoSubTunnels !== false})`);
+        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Target: ${targetHost}:${targetPort} -> Public URL: ${publicUrl}`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -390,11 +390,12 @@ wss.on('connection', (ws: WebSocket, req) => {
 
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
-                    
-                    // Comprehensive Location Header Rewriting for 301/302 Redirects
-                    const ipOrHostRegex = /http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9.-]+)(?::\d+)?/gi;
+                    const targetHostEscaped = session.targetHost.replace(/\./g, '\\.');
 
-                    headerValue = headerValue.replace(ipOrHostRegex, `https://${publicHost}`);
+                    headerValue = headerValue
+                      .replace(new RegExp(`http:\\/\\/${targetHostEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
+                      .replace(/http:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+                    
                     log('INFO', `[Redirect Rewritten 301/302] Location header -> ${headerValue}`);
                   }
 
