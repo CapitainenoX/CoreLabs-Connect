@@ -4,8 +4,9 @@ const https = require('https');
 const readline = require('readline');
 const os = require('os');
 const net = require('net');
+const fs = require('fs');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
@@ -14,6 +15,34 @@ function debugLog(msg, data) {
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
   if (data) console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`, data);
   else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
+}
+
+function autoUpdateAndRestart() {
+  console.log('\n\x1b[33m⚡ MISE À JOUR CLIENT DÉTECTÉE !\x1b[0m');
+  console.log('\x1b[36m[+] Téléchargement de la dernière version du CLI depuis CoreLabs Server...\x1b[0m');
+
+  const fileStream = fs.createWriteStream(__filename);
+  const timestamp = Date.now();
+  const req = https.get(`https://${SERVER_HOST}/cli.js?v=${timestamp}`, (res) => {
+    res.pipe(fileStream);
+    fileStream.on('finish', () => {
+      fileStream.close(() => {
+        console.log('\x1b[32m✔ Mise à jour appliquée avec succès !\x1b[0m');
+        console.log('\x1b[33m🔄 Redémarrage automatique du CLI...\x1b[0m\n');
+        
+        const child = spawn(process.argv[0], process.argv.slice(1), {
+          detached: true,
+          stdio: 'inherit'
+        });
+        child.unref();
+        process.exit(0);
+      });
+    });
+  });
+
+  req.on('error', (err) => {
+    debugLog('Erreur lors du téléchargement de la mise à jour:', err.message);
+  });
 }
 
 function promptInput(question, defaultVal) {
@@ -304,13 +333,11 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page & Link Rewriting Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
   const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
 
-  // Clone headers and rewrite Host & Forwarded headers for reverse proxy compatibility
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
   forwardHeaders.host = `${targetHost}:${targetPort}`;
   forwardHeaders['x-forwarded-host'] = publicHost;
@@ -333,7 +360,6 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
       let fullBuffer = Buffer.concat(bodyChunks);
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
 
-      // If response is HTML, rewrite any hardcoded localhost/127.0.0.1 links to the tunnel public domain
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
         const localUrlRegex1 = new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${targetPort}`, 'g');
@@ -517,6 +543,12 @@ async function main() {
       try {
         const msgData = event.data || event;
         const msg = JSON.parse(msgData.toString());
+
+        // AUTO-UPDATE CLIENT TRIGGER
+        if (msg.type === 'UPDATE_CLIENT') {
+          autoUpdateAndRestart();
+          return;
+        }
 
         if (msg.type === 'HTTP_REQUEST') {
           handleIncomingTunnelRequest(msg, targetHost, selectedPort, sendWs);

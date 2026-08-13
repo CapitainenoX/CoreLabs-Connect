@@ -14,6 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
+const SERVER_VERSION = '1.1.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -45,6 +46,21 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
+
+function broadcastClientUpdate(reason: string = 'Mise à jour du serveur') {
+  log('INFO', `[Auto-Update Broadcast] Envoi du signal de mise à jour à tous les clients connectés. Raison: ${reason}`);
+  const updatePayload = JSON.stringify({
+    type: 'UPDATE_CLIENT',
+    version: SERVER_VERSION,
+    reason
+  });
+
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(updatePayload);
+    }
+  });
+}
 
 function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   try {
@@ -117,7 +133,6 @@ app.use((req, res, next) => {
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
-        // Forward full HTTP request with proxy headers
         const forwardedHeaders = Object.assign({}, req.headers);
         forwardedHeaders['x-forwarded-host'] = host;
         forwardedHeaders['x-forwarded-proto'] = 'https';
@@ -153,6 +168,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Admin update broadcast trigger API
+app.post('/api/admin/broadcast-update', (req, res) => {
+  broadcastClientUpdate(req.body.reason || 'Mise à jour déclenchée par administrateur');
+  return res.json({ success: true, message: 'Signal de mise à jour envoyé à tous les clients.' });
+});
+
 // 2. STATIC LANDING PAGE
 app.use(express.static(publicPath, {
   setHeaders: (res) => {
@@ -172,7 +193,7 @@ app.get('/', (req, res) => {
   return res.send(`
     <html>
       <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-        <h2>⚡ CoreLabs Tunnel Server</h2>
+        <h2>⚡ CoreLabs Tunnel Server v${SERVER_VERSION}</h2>
       </body>
     </html>
   `);
@@ -326,7 +347,8 @@ wss.on('connection', (ws: WebSocket, req) => {
           type: 'TUNNEL_READY',
           subdomain: cleanSubdomain,
           publicUrl,
-          domain: BASE_DOMAIN
+          domain: BASE_DOMAIN,
+          serverVersion: SERVER_VERSION
         }));
       }
 
@@ -346,7 +368,6 @@ wss.on('connection', (ws: WebSocket, req) => {
                 if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length' && lowerK !== 'content-encoding') {
                   let headerValue = headers[k];
 
-                  // Rewrite Location headers (301/302 redirects) to stay on tunnel domain
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
                     headerValue = headerValue
@@ -506,9 +527,20 @@ mcTcpServer.listen(MC_TCP_PORT, () => {
   log('INFO', `[Minecraft TCP Engine] Écoute des joueurs Minecraft sur le port TCP ${MC_TCP_PORT}`);
 });
 
+// Process shutdown broadcast trigger
+process.on('SIGTERM', () => {
+  broadcastClientUpdate('Redémarrage serveur (SIGTERM)');
+  setTimeout(() => process.exit(0), 500);
+});
+
+process.on('SIGINT', () => {
+  broadcastClientUpdate('Arrêt serveur (SIGINT)');
+  setTimeout(() => process.exit(0), 500);
+});
+
 server.listen(PORT, () => {
   log('INFO', `======================================================`);
-  log('INFO', `  CORELABS TUNNEL SERVER — Port ${PORT}`);
+  log('INFO', `  CORELABS TUNNEL SERVER v${SERVER_VERSION} — Port ${PORT}`);
   log('INFO', `  Domain: ${DOMAIN}`);
   log('INFO', `======================================================`);
 });
