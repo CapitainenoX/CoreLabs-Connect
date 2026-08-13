@@ -117,14 +117,19 @@ app.use((req, res, next) => {
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
-        // Forward full HTTP request with original URL
+        // Forward full HTTP request with proxy headers
+        const forwardedHeaders = Object.assign({}, req.headers);
+        forwardedHeaders['x-forwarded-host'] = host;
+        forwardedHeaders['x-forwarded-proto'] = 'https';
+
         session.ws.send(JSON.stringify({
           type: 'HTTP_REQUEST',
           requestId,
           method: req.method,
           path: requestPath,
-          headers: req.headers,
-          subdomain: sub
+          headers: forwardedHeaders,
+          subdomain: sub,
+          publicHost: host
         }));
 
         return;
@@ -339,7 +344,19 @@ wss.on('connection', (ws: WebSocket, req) => {
               Object.keys(headers).forEach(k => {
                 const lowerK = k.toLowerCase();
                 if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length' && lowerK !== 'content-encoding') {
-                  pending.res.setHeader(k, headers[k]);
+                  let headerValue = headers[k];
+
+                  // Rewrite Location headers (301/302 redirects) to stay on tunnel domain
+                  if (lowerK === 'location' && typeof headerValue === 'string') {
+                    const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
+                    headerValue = headerValue
+                      .replace(/http:\/\/127\.0\.0\.1:\d+/g, `https://${publicHost}`)
+                      .replace(/http:\/\/localhost:\d+/g, `https://${publicHost}`)
+                      .replace(new RegExp(`http://${session.targetHost}:${session.targetPort}`, 'g'), `https://${publicHost}`);
+                    log('INFO', `[Redirect Rewritten] Location header -> ${headerValue}`);
+                  }
+
+                  pending.res.setHeader(k, headerValue);
                 }
               });
             }

@@ -304,13 +304,17 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page & Asset Proxying Handler
+// Multi-Page & Link Rewriting Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
-  // Clone headers, rewrite Host for local web app, and disable gzip compression so raw response is returned
+  const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
+
+  // Clone headers and rewrite Host & Forwarded headers for reverse proxy compatibility
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
   forwardHeaders.host = `${targetHost}:${targetPort}`;
+  forwardHeaders['x-forwarded-host'] = publicHost;
+  forwardHeaders['x-forwarded-proto'] = 'https';
   delete forwardHeaders['accept-encoding'];
   delete forwardHeaders['connection'];
 
@@ -326,7 +330,24 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
     let bodyChunks = [];
     localRes.on('data', chunk => bodyChunks.push(chunk));
     localRes.on('end', () => {
-      const fullBuffer = Buffer.concat(bodyChunks);
+      let fullBuffer = Buffer.concat(bodyChunks);
+      const contentType = (localRes.headers['content-type'] || '').toLowerCase();
+
+      // If response is HTML, rewrite any hardcoded localhost/127.0.0.1 links to the tunnel public domain
+      if (contentType.includes('text/html')) {
+        let htmlStr = fullBuffer.toString('utf-8');
+        const localUrlRegex1 = new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${targetPort}`, 'g');
+        const localUrlRegex2 = new RegExp(`http:\\/\\/localhost:${targetPort}`, 'g');
+        const localUrlRegex3 = new RegExp(`http:\\/\\/${targetHost}:${targetPort}`, 'g');
+
+        htmlStr = htmlStr
+          .replace(localUrlRegex1, `https://${publicHost}`)
+          .replace(localUrlRegex2, `https://${publicHost}`)
+          .replace(localUrlRegex3, `https://${publicHost}`);
+
+        fullBuffer = Buffer.from(htmlStr, 'utf-8');
+      }
+
       const b64Data = fullBuffer.toString('base64');
       
       debugLog(`Page locale chargée [${reqMsg.requestId}] Path: ${reqMsg.path} Status: ${localRes.statusCode}`);
