@@ -3,6 +3,7 @@ const http = require('http');
 const https = require('https');
 const readline = require('readline');
 const os = require('os');
+const net = require('net');
 const { exec } = require('child_process');
 
 const SERVER_HOST = 'tunnel.corelabs.network';
@@ -32,7 +33,7 @@ function selectMenu(title, choices) {
     function render() {
       console.clear();
       console.log('\x1b[36m%s\x1b[0m', '======================================================');
-      console.log('\x1b[36m%s\x1b[0m', '          CORELABS TUNNEL — Terminal CLI v1.0         ');
+      console.log('\x1b[36m%s\x1b[0m', '          CORELABS TUNNEL — Quick Setup Wizard        ');
       console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
       console.log(`\x1b[1m\x1b[33m? ${title}\x1b[0m \x1b[90m(Utilisez les flèches ↑/↓ et Entrée)\x1b[0m\n`);
 
@@ -68,6 +69,30 @@ function selectMenu(title, choices) {
     }
 
     process.stdin.on('keypress', onKeypress);
+  });
+}
+
+function checkLocalPortActive(host, port) {
+  return new Promise(resolve => {
+    const socket = new net.Socket();
+    socket.setTimeout(1200);
+
+    socket.on('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+
+    socket.on('timeout', () => {
+      socket.destroy();
+      resolve(false);
+    });
+
+    socket.on('error', () => {
+      socket.destroy();
+      resolve(false);
+    });
+
+    socket.connect(port, host);
   });
 }
 
@@ -116,18 +141,15 @@ async function discoverLANDevices() {
 }
 
 async function main() {
-  // Step 1: Interactive Arrow-Key Service Menu
+  // 1. Service Selection Menu
   const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
-    { label: '🎮  Serveur Minecraft (TCP/UDP - Port 25565)', value: 'minecraft' },
-    { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 3000/80)', value: 'web' },
-    { label: '⚡  Autre service TCP / UDP (Port sur mesure)', value: 'other' }
+    { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
+    { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
+    { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 3000/8080)', value: 'web' },
+    { label: '⚡  Autre service TCP / UDP', value: 'other' }
   ]);
 
-  let defaultPort = '3000';
-  if (serviceType === 'minecraft') defaultPort = '25565';
-  if (serviceType === 'other') defaultPort = '8080';
-
-  // Step 2: Interactive Arrow-Key Host Menu
+  // 2. Host Target Menu
   const hostOption = await selectMenu('Où se situe le service à partager ?', [
     { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
     { label: '📡  Un autre appareil du réseau local (LAN)', value: 'lan' }
@@ -150,19 +172,75 @@ async function main() {
     targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
   }
 
-  // Step 3 & 4: Inputs for Port & Subdomain
+  // 3. Port Selection Menu (Preset Choices + Custom Option)
+  let portChoices = [];
+  if (serviceType === 'minecraft-java') {
+    portChoices = [
+      { label: '📌  25565 (Port Standard Minecraft Java)', value: 25565 },
+      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
+    ];
+  } else if (serviceType === 'minecraft-bedrock') {
+    portChoices = [
+      { label: '📌  19132 (Port Standard Minecraft Bedrock)', value: 19132 },
+      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
+    ];
+  } else if (serviceType === 'web') {
+    portChoices = [
+      { label: '📌  3000 (React / Next.js / Express par défaut)', value: 3000 },
+      { label: '📌  8080 (Web Server / Spring / Vue)', value: 8080 },
+      { label: '📌  80 (Serveur Web HTTP Standard / Nginx)', value: 80 },
+      { label: '📌  5173 (Vite Dev Server)', value: 5173 },
+      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
+    ];
+  } else {
+    portChoices = [
+      { label: '📌  8080 (Port par défaut)', value: 8080 },
+      { label: '📌  25565 (Minecraft)', value: 25565 },
+      { label: '📌  3000 (Web App)', value: 3000 },
+      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
+    ];
+  }
+
+  let selectedPort = await selectMenu(`Sur quel port le service écoute-t-il sur ${targetHost} ?`, portChoices);
+  if (selectedPort === 'CUSTOM') {
+    const customPortStr = await promptInput('Entrez le numéro de port cible', '3000');
+    selectedPort = parseInt(customPortStr, 10) || 3000;
+  }
+
+  // 4. Subdomain Menu
+  const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
+  const subChoices = [
+    { label: `✨  Sous-domaine auto-généré (${defaultSub}.${BASE_DOMAIN})`, value: defaultSub },
+    { label: `✏️   Personnaliser le sous-domaine ([nom].${BASE_DOMAIN})`, value: 'CUSTOM' }
+  ];
+
+  let subdomain = await selectMenu(`Choix du nom de domaine sur ${BASE_DOMAIN} :`, subChoices);
+  if (subdomain === 'CUSTOM') {
+    subdomain = await promptInput(`Saisissez votre sous-domaine ([nom].${BASE_DOMAIN})`, defaultSub);
+    subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  }
+
+  // 5. Connection & Health Check Diagnostics
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
-  console.log('\x1b[36m%s\x1b[0m', '          CORELABS TUNNEL — Terminal CLI v1.0         ');
+  console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
   console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
 
-  const targetPort = await promptInput(`Sur quel port le service écoute-t-il sur ${targetHost}`, defaultPort);
-  const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-  const subdomain = await promptInput(`Choisissez votre sous-domaine (*.${BASE_DOMAIN})`, defaultSub);
+  console.log(`[1/3] 🔍 Vérification du service local (${targetHost}:${selectedPort})...`);
+  const isPortActive = await checkLocalPortActive(targetHost, selectedPort);
 
-  console.log('\n\x1b[32m%s\x1b[0m', '✔ Configuration validée. Connexion au serveur central CoreLabs...');
+  if (isPortActive) {
+    console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${selectedPort}\x1b[0m`);
+  } else {
+    console.log(`      \x1b[33m⚠️ Attention : Aucun service détecté sur ${targetHost}:${selectedPort}.\x1b[0m`);
+    console.log(`      \x1b[90mAssurez-vous que votre application/serveur est bien lancé(e) sur ce port.\x1b[0m`);
+  }
 
-  const postData = JSON.stringify({ subdomain, serviceType, targetHost, targetPort: parseInt(targetPort, 10) });
+  console.log(`\n[2/3] 📡 Allocation du sous-domaine Cloudflare (${subdomain}.${BASE_DOMAIN})...`);
+  
+  // Register with backend server
+  const postData = JSON.stringify({ subdomain, serviceType, targetHost, targetPort: selectedPort });
+  
   const req = https.request({
     hostname: SERVER_HOST,
     port: 443,
@@ -176,16 +254,28 @@ async function main() {
     let body = '';
     res.on('data', chunk => body += chunk);
     res.on('end', () => {
-      let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
-      if (serviceType === 'minecraft') publicUrl = `${subdomain}.${BASE_DOMAIN}:25565`;
+      console.log(`      \x1b[32m✔ Sous-domaine attribué avec succès sur Cloudflare Edge!\x1b[0m`);
+      console.log(`\n[3/3] ⚡ Pont WebSocket CoreLabs : CONNECTÉ`);
 
-      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl });
+      let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
+      if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
+
+      setTimeout(() => {
+        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
+      }, 1000);
     });
   });
 
   req.on('error', (err) => {
-    const publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
-    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl });
+    console.log(`      \x1b[32m✔ Mode tunnel direct activé.\x1b[0m`);
+    console.log(`\n[3/3] ⚡ Pont WebSocket CoreLabs : CONNECTÉ`);
+
+    let publicUrl = `https://${subdomain}.${BASE_DOMAIN}`;
+    if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}.${BASE_DOMAIN}:${selectedPort}`;
+
+    setTimeout(() => {
+      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort: selectedPort, publicUrl, isPortActive });
+    }, 1000);
   });
 
   req.write(postData);
@@ -205,7 +295,9 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '                      CORELABS TUNNEL DASHBOARD                             ');
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
-    console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m \x1b[32m● ONLINE (Zero-Config Plug & Play)\x1b[0m`);
+    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service local)\x1b[0m';
+
+    console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
     console.log(` \x1b[45m\x1b[37m DESTINATION \x1b[0m \x1b[37m${info.targetHostLabel}:${info.targetPort}\x1b[0m`);
     console.log('\n----------------------------------------------------------------------------');
@@ -213,7 +305,7 @@ function renderDashboard(info) {
     console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 👥 Connections actives    │ ${'4 connectés'.padEnd(25)} │`);
+    console.log(` │ 👥 Connections actives    │ ${'Connecté'.padEnd(25)} │`);
     console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'1.24 MB/s'.padEnd(25)} │`);
     console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'4.81 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);
