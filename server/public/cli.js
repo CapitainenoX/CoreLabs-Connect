@@ -21,7 +21,7 @@ function debugLog(msg, data) {
   else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
 }
 
-function renderAsciiBanner() {
+function renderAsciiBanner(stepText = '') {
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', `
   ██████╗ ██████╗ ██████╗ ███████╗██╗      █████╗ ██████╗ ███████╗
@@ -32,6 +32,9 @@ function renderAsciiBanner() {
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
                      T U N N E L   v2.1
   `);
+  if (stepText) {
+    console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
+  }
 }
 
 // AES-256-GCM End-to-End Encryption Engine
@@ -143,7 +146,7 @@ function applyLiveHotUpdate() {
   });
 }
 
-function promptInput(question, defaultVal) {
+function promptInput(question, defaultVal, stepBadge = '') {
   return new Promise(resolve => {
     if (process.stdin.isPaused()) process.stdin.resume();
 
@@ -161,7 +164,7 @@ function promptInput(question, defaultVal) {
   });
 }
 
-function selectMenu(title, choices) {
+function selectMenu(title, choices, stepBadge = '') {
   return new Promise((resolve) => {
     let selectedIndex = 0;
 
@@ -170,7 +173,7 @@ function selectMenu(title, choices) {
     }
 
     function render() {
-      renderAsciiBanner();
+      renderAsciiBanner(stepBadge);
       console.log(`\x1b[1m\x1b[33m? ${title}\x1b[0m \x1b[90m(Flèches ↑/↓ et Entrée)\x1b[0m\n`);
 
       choices.forEach((choice, idx) => {
@@ -438,7 +441,6 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// XAMPP / Apache Subfolder Deep Routing & Multi-Page Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -483,7 +485,6 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
       const headers = Object.assign({}, localRes.headers);
 
-      // Rewrite XAMPP / Apache Location headers for subfolder redirects (e.g. /koogle -> /koogle/)
       if (headers.location && typeof headers.location === 'string') {
         const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         headers.location = headers.location
@@ -494,7 +495,6 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
 
-        // Comprehensive XAMPP / WAMP / Apache Subfolder URL Rewriting
         const targetHostEscaped = actualTargetHost.replace(/\./g, '\\.');
         htmlStr = htmlStr
           .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
@@ -546,7 +546,6 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
             <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:16px; background:#12121a; max-width:450px;">
               <h2 style="color:#ef4444; margin-bottom:1rem;">⚠️ Service Local Inaccessible (502)</h2>
               <p style="color:#aaa; font-size:0.95rem;">Impossible de joindre le site sur <b>${actualTargetHost}:${actualTargetPort}</b> pour la sous-page <b>${reqPath}</b></p>
-              <p style="color:#666; font-size:0.85rem; margin-top:1rem;">Vérifiez que votre serveur XAMPP / WAMP ou application local est démarré.</p>
             </div>
           </body>
         </html>
@@ -566,13 +565,13 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
 async function startMultiTunnelSession(sessionConfig) {
   const { tunnels, autoStart } = sessionConfig;
   saveActiveSession(sessionConfig);
-  configureAutoStart(autoStart !== false); // Auto-start enabled by default
+  configureAutoStart(autoStart !== false);
 
   let retryDelay = 1000;
   let isReconnecting = false;
 
   async function connectBridge() {
-    renderAsciiBanner();
+    renderAsciiBanner('ÉTABLISSEMENT DE LA CONNEXION SÉCURISÉE');
     console.log(`📡 Connexion au pont WebSocket CoreLabs Server (AES-256-GCM)...`);
 
     for (let i = 0; i < tunnels.length; i++) {
@@ -615,7 +614,7 @@ async function startMultiTunnelSession(sessionConfig) {
         }, 12000);
 
         setTimeout(() => {
-          renderMultiDashboard({ tunnels, autoStart: true });
+          renderMultiDashboard({ tunnels, autoStart: autoStart !== false });
         }, 800);
       };
 
@@ -709,12 +708,13 @@ async function main() {
     }
   }
 
-  // ULTRA-SIMPLE 2-STEP SETUP WIZARD (CLEAR & FAST!)
-  const serviceTypeChoice = await selectMenu('Que souhaitez-vous partager ?', [
-    { label: '🌐  Site Web / App HTTP (XAMPP, WAMP, React, Node - Port 80/3000)', value: 'web' },
-    { label: '🎮  Serveur Minecraft Java / Bedrock', value: 'minecraft-java' },
-    { label: '🔀  Mode Multi-Tunnels Ciblé (Exposer plusieurs appareils)', value: 'MULTI' }
-  ]);
+  // STYLISH 4-STEP GUIDED WIZARD
+  const serviceTypeChoice = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
+    { label: '🌐  Site Web / App HTTP / XAMPP (Port 80/3000/8080)', value: 'web' },
+    { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
+    { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
+    { label: '🔀  Mode Multi-Tunnels Ciblé (Exposer plusieurs PC/ports simultanés)', value: 'MULTI' }
+  ], 'ÉTAPE 1/4 — TYPE DE SERVICE');
 
   const tunnels = [];
 
@@ -723,13 +723,10 @@ async function main() {
     let count = 1;
 
     while (addMore) {
-      renderAsciiBanner();
-      console.log(`\x1b[36m[+] Configuration du Tunnel Ciblé N°${count}\x1b[0m\n`);
-
-      const hostOption = await selectMenu(`[Tunnel ${count}] Emplacement de l'appareil :`, [
+      const hostOption = await selectMenu(`[Tunnel Ciblé N°${count}] Sélection de l'appareil à exposer :`, [
         { label: '💻  Cette machine (127.0.0.1 / Localhost / XAMPP)', value: 'local' },
-        { label: '📡  Un appareil du réseau local (LAN)', value: 'lan' }
-      ]);
+        { label: '📡  Scanner et choisir un appareil du réseau local (LAN)', value: 'lan' }
+      ], `ÉTAPE 2/4 — SÉLECTION APPAREIL (${count})`);
 
       let targetHost = '127.0.0.1';
       let targetHostLabel = 'Localhost (127.0.0.1)';
@@ -737,16 +734,18 @@ async function main() {
       if (hostOption === 'lan') {
         const devices = await discoverLANDevices();
         const lanChoices = devices.map(d => ({ label: `🖥️   ${d.ip} — ${d.name}`, value: d }));
-        const selectedDevice = await selectMenu(`[Tunnel ${count}] Sélection de l'appareil LAN :`, lanChoices);
+        const selectedDevice = await selectMenu(`[Tunnel Ciblé N°${count}] Choisissez le PC du réseau local (LAN) :`, lanChoices, `ÉTAPE 2/4 — APPAREIL LAN (${count})`);
         targetHost = selectedDevice.ip;
         targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
       }
 
-      const portStr = await promptInput(`[Tunnel ${count}] Port d'écoute sur ${targetHost}`, '80');
+      renderAsciiBanner(`ÉTAPE 2/4 — PORT DU SERVICE (${count})`);
+      const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, '80');
       const targetPort = parseInt(portStr, 10) || 80;
 
+      renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOMAINE DÉDIÉ (${count})`);
       const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-      let subdomain = await promptInput(`[Tunnel ${count}] Nom de votre sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+      let subdomain = await promptInput(`Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
       subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
       tunnels.push({
@@ -759,28 +758,47 @@ async function main() {
         autoSubTunnels: true
       });
 
-      const choice = await selectMenu('Ajouter un autre tunnel ciblé ?', [
-        { label: '➕  Oui, ajouter un autre appareil/port', value: true },
-        { label: '✅  Non, démarrer mes tunnels maintenant', value: false }
-      ]);
+      const choice = await selectMenu('Souhaitez-vous ajouter un autre appareil/port dans cette même session ?', [
+        { label: '➕  Oui, ajouter un autre tunnel ciblé', value: true },
+        { label: '✅  Non, valider et continuer', value: false }
+      ], `ÉTAPE 3/4 — MULTI-TUNNELS (${count})`);
 
       addMore = choice;
       count++;
     }
 
   } else {
-    // Ultra-Fast 1-Step Subdomain Prompt for Single Mode
-    const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-    let subdomain = await promptInput(`Quel nom souhaitez-vous pour votre URL public ? ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
-    subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    // Single Mode Guided Steps
+    const hostOption = await selectMenu('Où se situe le service que vous souhaitez partager ?', [
+      { label: '💻  Cette machine (127.0.0.1 / Localhost / XAMPP)', value: 'local' },
+      { label: '📡  Un autre appareil / PC du réseau local (LAN)', value: 'lan' }
+    ], 'ÉTAPE 2/4 — EMPLACEMENT APPAREIL');
 
-    let targetPort = 80;
-    if (serviceTypeChoice.startsWith('minecraft')) targetPort = 25565;
+    let targetHost = '127.0.0.1';
+    let targetHostLabel = 'Localhost (XAMPP/App)';
+
+    if (hostOption === 'lan') {
+      const devices = await discoverLANDevices();
+      const lanChoices = devices.map(d => ({ label: `🖥️   ${d.ip} — ${d.name}`, value: d }));
+      const selectedDevice = await selectMenu('Sélectionnez le PC du réseau local (LAN) à cibler :', lanChoices, 'ÉTAPE 2/4 — SCAN RÉSEAU LAN');
+      targetHost = selectedDevice.ip;
+      targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
+    }
+
+    renderAsciiBanner('ÉTAPE 3/4 — PORT & NOM DE L\'URL');
+    let defaultPort = '80';
+    if (serviceTypeChoice.startsWith('minecraft')) defaultPort = '25565';
+    const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, defaultPort);
+    const targetPort = parseInt(portStr, 10) || parseInt(defaultPort, 10);
+
+    const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
+    let subdomain = await promptInput(`Nom de votre sous-domaine public ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+    subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
     tunnels.push({
       serviceType: serviceTypeChoice,
-      targetHost: '127.0.0.1',
-      targetHostLabel: 'Localhost (XAMPP/App)',
+      targetHost,
+      targetHostLabel,
       targetPort,
       subdomain,
       publicUrl: serviceTypeChoice.startsWith('minecraft') ? `${subdomain}-tunnel.${BASE_DOMAIN}:25565` : `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
@@ -788,22 +806,29 @@ async function main() {
     });
   }
 
+  // STEP 4: Advanced Boot & Network Options
+  const autoStart = await selectMenu('Activer le Démarrage Automatique au lancement du PC ?', [
+    { label: '🚀  [✓] ACTIVÉ — Démarrer automatiquement le tunnel en arrière-plan au lancement de Windows/OS (Recommandé)', value: true },
+    { label: '🔒  [ ] DÉSACTIVÉ — Lancement manuel uniquement', value: false }
+  ], 'ÉTAPE 4/4 — DÉMARRAGE AUTOMATIQUE BOOT');
+
   await startMultiTunnelSession({
     tunnels,
-    autoStart: true
+    autoStart
   });
 }
 
 function renderMultiDashboard(info) {
   const startTime = Date.now();
   setInterval(() => {
-    renderAsciiBanner();
+    renderAsciiBanner('DASHBOARD CORELABS TUNNEL - EN DIRECT');
 
     const encStatus = currentEncryptionKey ? '\x1b[32m● AES-256-GCM (Chiffrement Authentifié End-to-End)\x1b[0m' : '\x1b[33m● STANDARD\x1b[0m';
     const hotReloadStatus = lastHotUpdate ? `\x1b[32m● EN DIRECT À ${lastHotUpdate}\x1b[0m` : '\x1b[36m● PRÊT (Zéro Redémarrage)\x1b[0m';
+    const bootStatus = info.autoStart ? '\x1b[32m● ACTIVÉ (Arrière-plan au démarrage PC)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m ÉCURITÉ \x1b[0m ${encStatus}`);
-    console.log(` \x1b[44m\x1b[37m AUTO-START \x1b[0m \x1b[32m● ACTIVÉ (Arrière-plan au démarrage)\x1b[0m`);
+    console.log(` \x1b[44m\x1b[37m AUTO-START \x1b[0m ${bootStatus}`);
     console.log(` \x1b[45m\x1b[37m HOT-RELOAD \x1b[0m ${hotReloadStatus}`);
     console.log('----------------------------------------------------------------------------');
     console.log('\x1b[1m\x1b[33m 🌐 TUNNELS ACTIFS (' + info.tunnels.length + ' Service(s) Exposé(s)) :\x1b[0m\n');
