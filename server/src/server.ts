@@ -66,9 +66,9 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Windows GitBash / Linux / macOS Installer script (Path-resolved for Windows)
+// Universal bash installer for Linux / macOS / GitBash / WSL
 app.get(['/install.sh', '/install'], (req, res) => {
-  log('INFO', 'Distribution du script d\'installation/mise-à-jour install.sh');
+  log('INFO', 'Distribution du script install.sh');
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
@@ -90,10 +90,8 @@ else
 fi
 
 if [ -d "$INSTALL_DIR" ]; then
-    echo "[+] Nettoyage de l'ancienne version..."
     rm -rf "$INSTALL_DIR"
 fi
-
 mkdir -p "$INSTALL_DIR"
 
 NODE_CMD="node"
@@ -103,9 +101,11 @@ elif command -v node.exe >/dev/null 2>&1; then
     NODE_CMD="node.exe"
 elif [ -f "/c/Program Files/nodejs/node.exe" ]; then
     NODE_CMD="/c/Program Files/nodejs/node.exe"
+elif [ -f "/c/Program Files (x86)/nodejs/node.exe" ]; then
+    NODE_CMD="/c/Program Files (x86)/nodejs/node.exe"
 fi
 
-echo "[+] Téléchargement du CLI CoreLabs Tunnel depuis ${DOMAIN}..."
+echo "[+] Téléchargement de CoreLabs Tunnel..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
 
 CLI_FILE="$INSTALL_DIR/cli.js"
@@ -118,15 +118,15 @@ echo -e "\\033[1;32m[✓] Lancement de CoreLabs Tunnel...\\033[0m\\n"
 `);
 });
 
-// PowerShell Installer script for Windows
+// Universal Windows PowerShell installer (Finds Node.js everywhere)
 app.get(['/install.ps1', '/ps1'], (req, res) => {
-  log('INFO', 'Distribution du script d\'installation/mise-à-jour install.ps1');
+  log('INFO', 'Distribution du script install.ps1');
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
 
-  res.send(`# CoreLabs Tunnel PowerShell Auto-Update & Clean Installer
+  res.send(`# CoreLabs Tunnel Universal Windows Installer
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "          CORELABS TUNNEL INSTANT INSTALLER           " -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
@@ -134,25 +134,51 @@ Write-Host "======================================================" -ForegroundC
 $InstallDir = "$env:USERPROFILE\\.corelabs-tunnel"
 
 if (Test-Path $InstallDir) {
-    Write-Host "[+] Nettoyage de l'ancienne version..." -ForegroundColor Yellow
     Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Path $InstallDir | Out-Null
 
-$NodePath = "node"
-if (Get-Command node -ErrorAction SilentlyContinue) {
-    $NodePath = "node"
-} elseif (Test-Path "C:\\Program Files\\nodejs\\node.exe") {
-    $NodePath = "C:\\Program Files\\nodejs\\node.exe"
+# Resolve Node.js binary on any Windows PC
+$NodePath = ""
+$PossiblePaths = @(
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Program Files (x86)\\nodejs\\node.exe",
+    "$env:LOCALAPPDATA\\Programs\\node\\node.exe",
+    "$env:LOCALAPPDATA\\Microsoft\\WinGet\\Links\\node.exe"
+)
+
+foreach ($p in $PossiblePaths) {
+    if (Test-Path $p) {
+        $NodePath = $p
+        break
+    }
 }
 
-Write-Host "[+] Téléchargement de la dernière version..." -ForegroundColor Green
+if (-not $NodePath) {
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        $NodePath = "node"
+    } else {
+        Write-Host "[!] Node.js non détecté. Installation automatique en cours..." -ForegroundColor Yellow
+        winget install OpenJS.NodeJS --accept-source-agreements --accept-package-agreements --silent
+        foreach ($p in $PossiblePaths) {
+            if (Test-Path $p) {
+                $NodePath = $p
+                break
+            }
+        }
+        if (-not $NodePath) { $NodePath = "node" }
+    }
+}
+
+Write-Host "[+] Node.js détecté : $NodePath" -ForegroundColor Green
+Write-Host "[+] Téléchargement du CLI CoreLabs Tunnel..." -ForegroundColor Green
 $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
 Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
-& $NodePath "$CliPath" $args
+& "$NodePath" "$CliPath" $args
 `);
 });
 
