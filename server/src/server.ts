@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const cfManager = new CloudflareManager();
 
@@ -45,6 +45,7 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
+// Serve Landing Page on root /
 app.get('/', (req, res) => {
   const host = req.headers.host || '';
   const isMainDomain = host === DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
@@ -66,7 +67,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Auto-Update & Clean Reinstall Installer for Linux / macOS / GitBash
+// Auto-Update Installer for Linux / macOS / GitBash
 app.get(['/install.sh', '/install'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation/mise-à-jour install.sh');
   res.setHeader('Content-Type', 'text/plain');
@@ -85,7 +86,6 @@ echo -e "\\033[0m"
 
 INSTALL_DIR="$HOME/.corelabs-tunnel"
 
-# 1. Auto-Clean / Uninstall previous versions
 if [ -d "$INSTALL_DIR" ]; then
     echo "[+] Nettoyage de l'ancienne version CoreLabs Tunnel..."
     rm -rf "$INSTALL_DIR"
@@ -93,7 +93,6 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-# 2. Check Node.js or Auto-Install
 NODE_CMD="node"
 if command -v node >/dev/null 2>&1; then
     NODE_CMD="node"
@@ -110,11 +109,9 @@ else
     fi
 fi
 
-# 3. Download fresh CLI directly from CoreLabs Server
 echo "[+] Téléchargement de la dernière version du CLI depuis ${DOMAIN}..."
 curl -fsSL "https://${DOMAIN}/cli.js?v=$(date +%s)" -o "$INSTALL_DIR/cli.js" || wget -q "https://${DOMAIN}/cli.js" -O "$INSTALL_DIR/cli.js"
 
-# 4. Create global 'corelabs-tunnel' executable command
 echo "[+] Configuration de la commande globale 'corelabs-tunnel'..."
 cat << 'EOF' > "$INSTALL_DIR/corelabs-tunnel"
 #!/usr/bin/env bash
@@ -132,7 +129,7 @@ echo -e "\\033[1;32m[✓] Mise à jour terminée ! Lancement de CoreLabs Tunnel.
 `);
 });
 
-// Auto-Update & Clean Reinstall Installer for Windows PowerShell
+// Auto-Update Installer for Windows PowerShell
 app.get(['/install.ps1', '/ps1'], (req, res) => {
   log('INFO', 'Distribution du script d\'installation/mise-à-jour install.ps1');
   res.setHeader('Content-Type', 'text/plain');
@@ -147,14 +144,12 @@ Write-Host "======================================================" -ForegroundC
 
 $InstallDir = "$env:USERPROFILE\\.corelabs-tunnel"
 
-# 1. Clean previous installation
 if (Test-Path $InstallDir) {
     Write-Host "[+] Suppression et nettoyage de l'ancienne version..." -ForegroundColor Yellow
     Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Path $InstallDir | Out-Null
 
-# 2. Check Node.js and Auto-Install if missing via winget
 $NodePath = "node"
 if (Get-Command node -ErrorAction SilentlyContinue) {
     $NodePath = "node"
@@ -166,13 +161,11 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
     $NodePath = "node"
 }
 
-# 3. Download fresh CLI bundle directly from CoreLabs Server
 Write-Host "[+] Téléchargement de la dernière version..." -ForegroundColor Green
 $CliPath = "$InstallDir\\cli.js"
 $Timestamp = Get-Date -Format "yyyyMMddHHmmss"
 Invoke-WebRequest -Uri "https://${DOMAIN}/cli.js?v=$Timestamp" -OutFile $CliPath
 
-# 4. Register global system command 'corelabs-tunnel' in Windows Path
 $BinDir = "$env:LOCALAPPDATA\\Microsoft\\WindowsApps"
 $BatchFile = "$BinDir\\corelabs-tunnel.cmd"
 $BatchContent = @"
@@ -295,7 +288,8 @@ app.use((req, res, next) => {
 
 server.listen(PORT, () => {
   log('INFO', `======================================================`);
-  log('INFO', `  CORELABS ZERO-CONFIG TUNNEL SERVER — Port ${PORT}`);
+  log('INFO', `  CORELABS TUNNEL SERVER — Port ${PORT}`);
+  log('INFO', `  Landing Page active sur http://localhost:${PORT}`);
   log('INFO', `  Domain: ${DOMAIN}`);
   log('INFO', `======================================================`);
 });
