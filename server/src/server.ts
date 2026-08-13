@@ -27,14 +27,6 @@ app.use(express.json());
 
 const publicPath = path.join(__dirname, '../public');
 
-app.use(express.static(publicPath, {
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-  }
-}));
-
 interface PendingRequest {
   res: express.Response;
   timeoutId: NodeJS.Timeout;
@@ -52,22 +44,94 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 
-app.get('/', (req, res) => {
+// 1. WILDCARD SUBDOMAIN TUNNEL PROXY (Must be FIRST before static landing page files)
+app.use((req, res, next) => {
   const host = req.headers.host || '';
-  const isMainDomain = host === DOMAIN || host === BASE_DOMAIN || host === `localhost:${PORT}` || host.startsWith('127.0.0.1');
+  
+  // Match [subdomain]-tunnel.corelabs.network or [subdomain].tunnel.corelabs.network or [subdomain].corelabs.network
+  const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i) || 
+                         host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
 
-  if (isMainDomain) {
-    const indexPath = path.join(publicPath, 'index.html');
-    if (fs.existsSync(indexPath)) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      return res.sendFile(indexPath);
+  if (subdomainMatch) {
+    const sub = subdomainMatch[1].toLowerCase();
+    
+    // Ignore main domain requests
+    if (sub !== 'tunnel') {
+      log('INFO', `[Tunnel Request] Interception sous-domaine: ${sub} (Host: ${host}, Path: ${req.url})`);
+      const session = activeTunnels.get(sub);
+
+      if (session && session.ws.readyState === WebSocket.OPEN) {
+        const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
+        const timeoutId = setTimeout(() => {
+          if (session.pendingRequests.has(requestId)) {
+            session.pendingRequests.delete(requestId);
+            log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}`);
+            res.status(504).send(`
+              <html>
+                <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+                  <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+                    <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
+                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
+                  </div>
+                </body>
+              </html>
+            `);
+          }
+        }, 10000);
+
+        session.pendingRequests.set(requestId, { res, timeoutId });
+
+        session.ws.send(JSON.stringify({
+          type: 'HTTP_REQUEST',
+          requestId,
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+          subdomain: sub
+        }));
+
+        return;
+      } else {
+        log('WARN', `Sous-domaine inactif ou session fermée pour: ${sub}`);
+        return res.status(404).send(`
+          <html>
+            <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
+              <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
+                <h3 style="color:#eab308;">⚠️ Tunnel Non Connecté</h3>
+                <p style="color:#aaa;">Le tunnel <b>${sub}</b> n'est actuellement pas connecté.</p>
+                <p style="color:#8a8a9a; font-size:0.85rem;">Lancez la commande <code>corelabs-tunnel</code> sur votre ordinateur pour ouvrir ce sous-domaine.</p>
+              </div>
+            </body>
+          </html>
+        `);
+      }
     }
+  }
+
+  next();
+});
+
+// 2. MAIN DOMAIN LANDING PAGE & STATIC ASSETS
+app.use(express.static(publicPath, {
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+}));
+
+app.get('/', (req, res) => {
+  const indexPath = path.join(publicPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.sendFile(indexPath);
   }
 
   return res.send(`
     <html>
       <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-        <h2>⚡ CoreLabs Tunnel — Subdomain Active</h2>
+        <h2>⚡ CoreLabs Tunnel Server</h2>
       </body>
     </html>
   `);
@@ -197,9 +261,7 @@ wss.on('connection', (ws: WebSocket, req) => {
         const { subdomain, serviceType, targetHost, targetPort } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
-        // Target domain format: [subdomain]-tunnel.corelabs.network (1st level wildcard SSL ready!)
-        const fullSubdomain = `${cleanSubdomain}-tunnel`;
-        await cfManager.createSubdomainRecord(fullSubdomain);
+        await cfManager.createSubdomainRecord(`${cleanSubdomain}-tunnel`);
 
         assignedSubdomain = cleanSubdomain;
         activeTunnels.set(cleanSubdomain, {
@@ -217,7 +279,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Actif] Public URL: ${publicUrl} -> Cible: ${targetHost}:${targetPort}`);
+        log('INFO', `[Tunnel Actif Enregistré] ${cleanSubdomain} -> ${publicUrl} (Cible local: ${targetHost}:${targetPort})`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -237,7 +299,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             clearTimeout(pending.timeoutId);
             session.pendingRequests.delete(requestId);
 
-            log('DEBUG', `[HTTP Proxy Response] ${subdomain}-tunnel.${BASE_DOMAIN} Status: ${statusCode}`);
+            log('DEBUG', `[HTTP Proxy Success] ${subdomain}-tunnel.${BASE_DOMAIN} Status: ${statusCode}`);
 
             if (headers) {
               Object.keys(headers).forEach(k => {
@@ -287,59 +349,6 @@ app.post('/api/tunnel/create', async (req, res) => {
     domain: BASE_DOMAIN,
     message: `Tunnel prêt sur ${publicUrl}`
   });
-});
-
-// Wildcard HTTP Proxy Handler for [subdomain]-tunnel.corelabs.network
-app.use((req, res, next) => {
-  const host = req.headers.host || '';
-  log('DEBUG', `Interception hôte entrant: ${host} (Path: ${req.url})`);
-
-  const subdomainMatch = host.match(/^([a-z0-9-]+)-tunnel\.corelabs\.network/i);
-
-  if (subdomainMatch) {
-    const sub = subdomainMatch[1].toLowerCase();
-    log('INFO', `Requête vers sous-domaine tunnel: ${sub}-tunnel.${BASE_DOMAIN}`);
-
-    const session = activeTunnels.get(sub);
-
-    if (session && session.ws.readyState === WebSocket.OPEN) {
-      const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-
-      const timeoutId = setTimeout(() => {
-        if (session.pendingRequests.has(requestId)) {
-          session.pendingRequests.delete(requestId);
-          log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}-tunnel.${BASE_DOMAIN}`);
-          res.status(504).send(`
-            <html>
-              <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-                <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-                  <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                  <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu dans le délai imparti.</p>
-                </div>
-              </body>
-            </html>
-          `);
-        }
-      }, 10000);
-
-      session.pendingRequests.set(requestId, { res, timeoutId });
-
-      session.ws.send(JSON.stringify({
-        type: 'HTTP_REQUEST',
-        requestId,
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        subdomain: sub
-      }));
-
-      return;
-    } else {
-      log('WARN', `Sous-domaine introuvable ou session WebSocket inactive pour: ${sub}-tunnel.${BASE_DOMAIN}`);
-    }
-  }
-
-  next();
 });
 
 server.listen(PORT, () => {
