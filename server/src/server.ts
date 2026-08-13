@@ -4,7 +4,6 @@ import path from 'path';
 import fs from 'fs';
 import http from 'http';
 import net from 'net';
-import dgram from 'dgram';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CloudflareManager } from './cloudflare';
 
@@ -46,6 +45,41 @@ interface TunnelSession {
 
 const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
+
+// Minecraft Handshake Packet Parser (Extracts hostname e.g. mycraft-tunnel.corelabs.network)
+function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
+  try {
+    let offset = 0;
+
+    function readVarInt(): number {
+      let value = 0;
+      let size = 0;
+      let b: number;
+      do {
+        if (offset >= buffer.length) return -1;
+        b = buffer[offset++];
+        value |= (b & 0x7f) << (size * 7);
+        size++;
+        if (size > 5) return -1;
+      } while ((b & 0x80) === 0x80);
+      return value;
+    }
+
+    const packetLength = readVarInt();
+    const packetId = readVarInt();
+    if (packetId !== 0x00) return null;
+
+    const protocolVersion = readVarInt();
+    const stringLength = readVarInt();
+
+    if (stringLength <= 0 || offset + stringLength > buffer.length) return null;
+
+    const host = buffer.toString('utf-8', offset, offset + stringLength);
+    return host;
+  } catch (err) {
+    return null;
+  }
+}
 
 // 1. WILDCARD SUBDOMAIN TUNNEL PROXY (HTTP)
 app.use((req, res, next) => {
@@ -280,7 +314,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Actif Enregistré] ${cleanSubdomain} -> ${publicUrl} (Minecraft/TCP: ${serviceType})`);
+        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Public URL: ${publicUrl}`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -313,7 +347,6 @@ wss.on('connection', (ws: WebSocket, req) => {
         }
       }
 
-      // Handle raw TCP response from local Minecraft server to remote player
       if (msg.type === 'TCP_DATA') {
         const { connectionId, data: b64Data } = msg;
         const tcpSocket = activeTcpSockets.get(connectionId);
@@ -366,53 +399,82 @@ app.post('/api/tunnel/create', async (req, res) => {
   });
 });
 
-// 3. MINECRAFT TCP SERVER ON PORT 25565 (Pipes raw TCP packets for Minecraft players)
+// 3. SMART MINECRAFT TCP ENGINE WITH HANDSHAKE SNI ROUTING (Port 25565)
 const MC_TCP_PORT = 25565;
 const mcTcpServer = net.createServer((socket) => {
   const connectionId = `mc_tcp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
   activeTcpSockets.set(connectionId, socket);
 
-  log('INFO', `[Minecraft Player Connected] Nouveau joueur sur TCP 25565 (${socket.remoteAddress})`);
+  let handshakeParsed = false;
+  let targetSession: TunnelSession | null = null;
 
-  // Find active Minecraft tunnel session
-  let mcSession: TunnelSession | null = null;
-  for (const session of activeTunnels.values()) {
-    if (session.serviceType.startsWith('minecraft') && session.ws.readyState === WebSocket.OPEN) {
-      mcSession = session;
-      break;
-    }
-  }
+  socket.on('data', (firstChunk) => {
+    if (!handshakeParsed) {
+      handshakeParsed = true;
 
-  if (!mcSession) {
-    log('WARN', `Joueur Minecraft refusé: Aucun tunnel Minecraft actif sur le serveur.`);
-    socket.destroy();
-    activeTcpSockets.delete(connectionId);
-    return;
-  }
+      // Extract Minecraft Handshake target hostname
+      const rawHost = parseMinecraftHandshakeHost(firstChunk);
+      log('INFO', `[Minecraft Handshake Entrant] Host tapé dans Minecraft: "${rawHost}" (${socket.remoteAddress})`);
 
-  // Notify client CLI to connect to local Minecraft server
-  mcSession.ws.send(JSON.stringify({
-    type: 'TCP_CONNECT',
-    connectionId,
-    subdomain: mcSession.subdomain,
-    targetHost: mcSession.targetHost,
-    targetPort: mcSession.targetPort
-  }));
+      if (rawHost) {
+        const cleanHost = rawHost.split('\0')[0].split(':')[0].toLowerCase();
+        const match = cleanHost.match(/^([a-z0-9-]+)-tunnel/i) || cleanHost.match(/^([a-z0-9-]+)\.tunnel/i) || cleanHost.match(/^([a-z0-9-]+)/i);
 
-  socket.on('data', (chunk) => {
-    if (mcSession && mcSession.ws.readyState === WebSocket.OPEN) {
-      mcSession.ws.send(JSON.stringify({
+        if (match) {
+          const sub = match[1].toLowerCase();
+          targetSession = activeTunnels.get(sub) || null;
+        }
+      }
+
+      // Fallback: Pick any active Minecraft session if single user
+      if (!targetSession) {
+        for (const session of activeTunnels.values()) {
+          if (session.serviceType.startsWith('minecraft') && session.ws.readyState === WebSocket.OPEN) {
+            targetSession = session;
+            break;
+          }
+        }
+      }
+
+      if (!targetSession) {
+        log('WARN', `Joueur Minecraft refusé: Aucun tunnel Minecraft trouvé pour l'hôte "${rawHost}".`);
+        socket.destroy();
+        activeTcpSockets.delete(connectionId);
+        return;
+      }
+
+      log('INFO', `[Minecraft Router] Joueur connecté au tunnel: ${targetSession.subdomain} -> ${targetSession.targetHost}:${targetSession.targetPort}`);
+
+      // Send TCP_CONNECT to client CLI
+      targetSession.ws.send(JSON.stringify({
+        type: 'TCP_CONNECT',
+        connectionId,
+        subdomain: targetSession.subdomain
+      }));
+
+      // Send the first Handshake chunk down the WebSocket
+      targetSession.ws.send(JSON.stringify({
         type: 'TCP_DATA',
         connectionId,
-        data: chunk.toString('base64')
+        data: firstChunk.toString('base64')
       }));
+
+    } else {
+      // Subsequent TCP chunks
+      if (targetSession && targetSession.ws.readyState === WebSocket.OPEN) {
+        targetSession.ws.send(JSON.stringify({
+          type: 'TCP_DATA',
+          connectionId,
+          data: firstChunk.toString('base64')
+        }));
+      }
     }
   });
 
   socket.on('close', () => {
     activeTcpSockets.delete(connectionId);
-    if (mcSession && mcSession.ws.readyState === WebSocket.OPEN) {
-      mcSession.ws.send(JSON.stringify({
+    if (targetSession && targetSession.ws.readyState === WebSocket.OPEN) {
+      targetSession.ws.send(JSON.stringify({
         type: 'TCP_CLOSE',
         connectionId
       }));
