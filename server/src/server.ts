@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.2.0';
+const SERVER_VERSION = '1.3.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -26,10 +26,15 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
 
 app.use(cors());
 
-// Raw Body Collector for POST/PUT/PATCH requests
-app.use(express.raw({ type: '*/*', limit: '50mb' }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Safe Raw Buffer Collector (Preserves POST/PUT data without breaking streams)
+app.use((req, res, next) => {
+  const chunks: Buffer[] = [];
+  req.on('data', chunk => chunks.push(chunk));
+  req.on('end', () => {
+    (req as any).rawBody = Buffer.concat(chunks);
+    next();
+  });
+});
 
 const publicPath = path.join(__dirname, '../public');
 
@@ -52,7 +57,7 @@ const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
 
 function broadcastClientUpdate(reason: string = 'Mise à jour du serveur') {
-  log('INFO', `[Auto-Update Broadcast] Signal de mise à jour envoyé à tous les clients. Raison: ${reason}`);
+  log('INFO', `[Auto-Update Broadcast] Signal envoyé aux clients. Raison: ${reason}`);
   const updatePayload = JSON.stringify({
     type: 'UPDATE_CLIENT',
     version: SERVER_VERSION,
@@ -61,7 +66,9 @@ function broadcastClientUpdate(reason: string = 'Mise à jour du serveur') {
 
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(updatePayload);
+      try {
+        client.send(updatePayload);
+      } catch (err) {}
     }
   });
 }
@@ -137,32 +144,27 @@ app.use((req, res, next) => {
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
-        // Forward full HTTP request headers and request body (for POST/PUT/PATCH)
         const forwardedHeaders = Object.assign({}, req.headers);
         forwardedHeaders['x-forwarded-host'] = host;
         forwardedHeaders['x-forwarded-proto'] = 'https';
 
-        let requestBodyB64 = '';
-        if (req.body) {
-          if (Buffer.isBuffer(req.body)) {
-            requestBodyB64 = req.body.toString('base64');
-          } else if (typeof req.body === 'object') {
-            requestBodyB64 = Buffer.from(JSON.stringify(req.body)).toString('base64');
-          } else if (typeof req.body === 'string') {
-            requestBodyB64 = Buffer.from(req.body).toString('base64');
-          }
-        }
+        const rawBodyBuf: Buffer = (req as any).rawBody;
+        const requestBodyB64 = rawBodyBuf && rawBodyBuf.length > 0 ? rawBodyBuf.toString('base64') : '';
 
-        session.ws.send(JSON.stringify({
-          type: 'HTTP_REQUEST',
-          requestId,
-          method: req.method,
-          path: requestPath,
-          headers: forwardedHeaders,
-          body: requestBodyB64,
-          subdomain: sub,
-          publicHost: host
-        }));
+        try {
+          session.ws.send(JSON.stringify({
+            type: 'HTTP_REQUEST',
+            requestId,
+            method: req.method,
+            path: requestPath,
+            headers: forwardedHeaders,
+            body: requestBodyB64,
+            subdomain: sub,
+            publicHost: host
+          }));
+        } catch (wsErr: any) {
+          log('ERROR', 'Erreur envoi WebSocket HTTP_REQUEST', wsErr.message);
+        }
 
         return;
       } else {
@@ -187,7 +189,7 @@ app.use((req, res, next) => {
 
 // Admin update broadcast trigger API
 app.post('/api/admin/broadcast-update', (req, res) => {
-  broadcastClientUpdate(req.body.reason || 'Mise à jour déclenchée par administrateur');
+  broadcastClientUpdate((req.body && req.body.reason) || 'Mise à jour déclenchée par administrateur');
   return res.json({ success: true, message: 'Signal de mise à jour envoyé à tous les clients.' });
 });
 
@@ -404,6 +406,8 @@ wss.on('connection', (ws: WebSocket, req) => {
 
             const responseBuffer = isBase64 ? Buffer.from(body || '', 'base64') : Buffer.from(body || '');
             pending.res.setHeader('content-length', responseBuffer.length);
+            
+            // Handle redirects (301, 302, 303, 307, 308) seamlessly for Post-Redirect-Get
             pending.res.status(statusCode || 200).send(responseBuffer);
           }
         }
