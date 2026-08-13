@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '2.2.0';
+const SERVER_VERSION = '2.3.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -277,7 +277,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & UNIVERSAL XAMPP SUBFOLDER ROUTER
+// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & UNIVERSAL ROUTER
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -285,7 +285,7 @@ app.use((req, res, next) => {
                          host.match(/^([a-z0-9-]+)\.tunnel\.corelabs\.network/i);
 
   if (subdomainMatch) {
-    const sub = subdomainMatch[1].toLowerCase();
+    let sub = subdomainMatch[1].toLowerCase().replace(/-tunnel$/i, '');
     
     if (sub !== 'tunnel') {
       const requestPath = req.originalUrl || req.url || '/';
@@ -498,7 +498,7 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 `);
 });
 
-// WEBSOCKET BRIDGE WITH UNIVERSAL LOCATION REWRITING FOR XAMPP SUBFOLDERS
+// WEBSOCKET BRIDGE WITH SOCKET OWNERSHIP PROTECTION ON DISCONNECT
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   const registeredSubdomains: string[] = [];
@@ -528,7 +528,9 @@ wss.on('connection', (ws: WebSocket, req) => {
         const registeredResults = [];
 
         for (const t of tunnelsToRegister) {
-          const cleanSubdomain = (t.subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
+          const rawSub = t.subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`;
+          const cleanSubdomain = rawSub.toLowerCase().replace(/[^a-z0-9-]/g, '').replace(/-tunnel$/i, '');
+          
           await cfManager.createSubdomainRecord(`${cleanSubdomain}-tunnel`);
 
           registeredSubdomains.push(cleanSubdomain);
@@ -584,7 +586,6 @@ wss.on('connection', (ws: WebSocket, req) => {
                 if (lowerK !== 'transfer-encoding' && lowerK !== 'content-length' && lowerK !== 'content-encoding') {
                   let headerValue = headers[k];
 
-                  // Universal Location header rewriting for XAMPP 301/302 redirects
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
                     
@@ -628,10 +629,14 @@ wss.on('connection', (ws: WebSocket, req) => {
     }
   });
 
+  // PROTECTED DISCONNECT: Only delete from activeTunnels if the closing WebSocket matches current session
   ws.onclose = () => {
     registeredSubdomains.forEach(sub => {
-      activeTunnels.delete(sub);
-      log('INFO', `Tunnel fermé: ${sub}-tunnel.${BASE_DOMAIN}`);
+      const currentSession = activeTunnels.get(sub);
+      if (currentSession && currentSession.ws === ws) {
+        activeTunnels.delete(sub);
+        log('INFO', `Tunnel fermé: ${sub}-tunnel.${BASE_DOMAIN}`);
+      }
     });
   };
 });
@@ -640,7 +645,7 @@ app.post('/api/tunnel/create', async (req, res) => {
   const { subdomain, serviceType, targetHost, targetPort } = req.body;
   if (!subdomain) return res.status(400).json({ error: 'Sous-domaine manquant.' });
 
-  const cleanSubdomain = subdomain.toLowerCase();
+  const cleanSubdomain = subdomain.toLowerCase().replace(/-tunnel$/i, '');
   const fullSubdomain = `${cleanSubdomain}-tunnel`;
   await cfManager.createSubdomainRecord(fullSubdomain);
 
@@ -679,7 +684,7 @@ const mcTcpServer = net.createServer((socket) => {
         const match = cleanHost.match(/^([a-z0-9-]+)-tunnel/i) || cleanHost.match(/^([a-z0-9-]+)\.tunnel/i) || cleanHost.match(/^([a-z0-9-]+)/i);
 
         if (match) {
-          const sub = match[1].toLowerCase();
+          const sub = match[1].toLowerCase().replace(/-tunnel$/i, '');
           targetSession = activeTunnels.get(sub) || null;
         }
       }
