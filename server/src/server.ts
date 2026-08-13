@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.4.0';
+const SERVER_VERSION = '1.5.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -351,7 +351,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           targetHost,
           targetPort,
           serviceType,
-          autoSubTunnels: autoSubTunnels !== false, // Enabled by default
+          autoSubTunnels: autoSubTunnels !== false,
           connectedAt: new Date(),
           pendingRequests: new Map()
         });
@@ -434,12 +434,12 @@ wss.on('connection', (ws: WebSocket, req) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.onclose = () => {
     if (assignedSubdomain) {
       activeTunnels.delete(assignedSubdomain);
       log('INFO', `Tunnel fermé: ${assignedSubdomain}-tunnel.${BASE_DOMAIN}`);
     }
-  });
+  };
 });
 
 app.post('/api/tunnel/create', async (req, res) => {
@@ -552,12 +552,12 @@ mcTcpServer.listen(MC_TCP_PORT, () => {
 
 process.on('SIGTERM', () => {
   broadcastClientUpdate('Redémarrage serveur (SIGTERM)');
-  setTimeout(() => process.exit(0), 500);
+  setTimeout(() => process.exit(0), 1500);
 });
 
 process.on('SIGINT', () => {
   broadcastClientUpdate('Arrêt serveur (SIGINT)');
-  setTimeout(() => process.exit(0), 500);
+  setTimeout(() => process.exit(0), 1500);
 });
 
 server.listen(PORT, () => {
