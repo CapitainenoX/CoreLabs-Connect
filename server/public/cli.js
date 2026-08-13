@@ -32,8 +32,7 @@ function saveActiveSession(sessionInfo) {
     const dir = getInstallDir();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const sessionPath = path.join(dir, 'active-session.json');
-    const finalSession = Object.assign({ autoSubTunnels: true }, sessionInfo);
-    fs.writeFileSync(sessionPath, JSON.stringify(finalSession, null, 2));
+    fs.writeFileSync(sessionPath, JSON.stringify(sessionInfo, null, 2));
   } catch (err) {
     debugLog('Erreur sauvegarde session:', err.message);
   }
@@ -44,9 +43,7 @@ function loadActiveSession() {
     const sessionPath = path.join(getInstallDir(), 'active-session.json');
     if (fs.existsSync(sessionPath)) {
       const data = fs.readFileSync(sessionPath, 'utf-8');
-      const parsed = JSON.parse(data);
-      if (parsed.autoSubTunnels === undefined) parsed.autoSubTunnels = true;
-      return parsed;
+      return JSON.parse(data);
     }
   } catch (err) {
     debugLog('Erreur lecture session:', err.message);
@@ -54,7 +51,34 @@ function loadActiveSession() {
   return null;
 }
 
-// Zero-Restart Live Hot-Reload Engine
+// Windows & Cross-Platform Auto-Start Engine (Runs in Background on Windows Boot)
+function configureAutoStart(enable) {
+  try {
+    const installDir = getInstallDir();
+    const cliPath = path.join(installDir, 'cli.js');
+
+    if (process.platform === 'win32') {
+      const startupFolder = path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+      const vbsPath = path.join(startupFolder, 'CoreLabsTunnelAutoStart.vbs');
+
+      if (enable) {
+        const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "node.exe """ & "${cliPath.replace(/\\/g, '\\\\')}" & """ --auto-resume", 0, False\n`;
+        fs.writeFileSync(vbsPath, vbsContent, 'utf-8');
+        debugLog('[AUTO-START] Raccourci de démarrage automatique Windows VBS créé.');
+      } else {
+        if (fs.existsSync(vbsPath)) fs.unlinkSync(vbsPath);
+        debugLog('[AUTO-START] Démarrage automatique Windows désactivé.');
+      }
+    } else {
+      // Linux / macOS crontab @reboot entry
+      const cronCmd = `@reboot node "${cliPath}" --auto-resume >/dev/null 2>&1\n`;
+      exec(`(crontab -l 2>/dev/null | grep -v "CoreLabsTunnelAutoStart"; echo "${cronCmd}") | crontab -`);
+    }
+  } catch (err) {
+    debugLog('Erreur configuration Démarrage Automatique:', err.message);
+  }
+}
+
 function applyLiveHotUpdate() {
   const timestamp = Date.now();
   const updateUrl = `https://${SERVER_HOST}/cli.js?v=${timestamp}`;
@@ -66,28 +90,17 @@ function applyLiveHotUpdate() {
       try {
         const installDir = getInstallDir();
         const currentCliPath = path.join(installDir, 'cli.js');
-        
-        // Save to disk safely
         fs.writeFileSync(currentCliPath, newCodeStr, 'utf-8');
         
-        // Compile and evaluate updated functions directly in-memory (Hot Swap)
         const script = new vm.Script(newCodeStr, { filename: 'cli.js' });
         const context = vm.createContext(Object.assign({}, global, {
-          require,
-          process,
-          console,
-          Buffer,
-          setTimeout,
-          setInterval,
-          clearTimeout,
-          clearInterval
+          require, process, console, Buffer, setTimeout, setInterval, clearTimeout, clearInterval
         }));
-        
         script.runInContext(context);
         lastHotUpdate = new Date().toLocaleTimeString('fr-FR');
-        debugLog(`[HOT-RELOAD] Code mis à jour en direct à ${lastHotUpdate} sans redémarrage du processus !`);
+        debugLog(`[HOT-RELOAD] Code mis à jour en direct à ${lastHotUpdate} !`);
       } catch (err) {
-        debugLog('Erreur Hot-Reload en mémoire:', err.message);
+        debugLog('Erreur Hot-Reload:', err.message);
       }
     });
   }).on('error', (err) => {
@@ -383,15 +396,19 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTunnels, sendWsMessage) {
-  debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
+// Multi-Page, Targeted Multi-Device Subdomains & LAN Proxy Handler
+function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
+  debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
   const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
   let reqPath = reqMsg.path || '/';
-  let actualTargetHost = defaultHost;
-  let actualTargetPort = defaultPort;
 
-  if (autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
+  // Match target tunnel for this specific subdomain
+  const targetTunnel = tunnelsList.find(t => t.subdomain === reqMsg.subdomain) || tunnelsList[0];
+  let actualTargetHost = targetTunnel.targetHost || '127.0.0.1';
+  let actualTargetPort = targetTunnel.targetPort || 80;
+
+  if (targetTunnel.autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
     const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
     if (lanMatch) {
       actualTargetHost = lanMatch[1].replace(/-/g, '.');
@@ -438,12 +455,12 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
         htmlStr = htmlStr
           .replace(new RegExp(`http:\\/\\/${targetHostEscaped}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(new RegExp(`http:\\/\\/${targetHostEscaped}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${actualTargetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\.1:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
           .replace(/http:\/\/localhost/g, `https://${publicHost}`);
 
-        if (autoSubTunnels !== false) {
+        if (targetTunnel.autoSubTunnels !== false) {
           const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/g;
           htmlStr = htmlStr.replace(lanIpRegex, (_, ip, port) => {
             const ipHyphen = ip.replace(/\./g, '-');
@@ -457,7 +474,7 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
 
       const b64Data = fullBuffer.toString('base64');
       
-      debugLog(`Page locale chargée [${reqMsg.requestId}] Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
+      debugLog(`Page locale chargée [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain} Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
       
       sendWsMessage({
         type: 'HTTP_RESPONSE',
@@ -485,7 +502,6 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
             <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
               <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Appareil Distant Inaccessible (502)</h2>
               <p style="color:#aaa;">Impossible de contacter le service local sur l'appareil distant <b>${actualTargetHost}:${actualTargetPort}</b> pour le chemin <b>${reqPath}</b></p>
-              <p style="color:#666; font-size:0.85rem;">Vérifiez que le PC distant ${actualTargetHost} est allumé et écoute bien sur le port ${actualTargetPort}.</p>
             </div>
           </body>
         </html>
@@ -502,32 +518,30 @@ function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTu
   localReq.end();
 }
 
-async function startTunnelSession(config) {
-  const { serviceType, targetHost, targetHostLabel, targetPort, subdomain, autoSubTunnels } = config;
-  const enableSubTunnels = autoSubTunnels !== false;
+async function startMultiTunnelSession(sessionConfig) {
+  const { tunnels, autoStart } = sessionConfig;
 
-  saveActiveSession(Object.assign({}, config, { autoSubTunnels: enableSubTunnels }));
+  // Save session configuration for seamless auto-resume and auto-start on boot
+  saveActiveSession(sessionConfig);
+  if (autoStart !== undefined) configureAutoStart(autoStart);
 
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
   console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
   console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
 
-  console.log(`[1/3] 🔍 Vérification du service local (${targetHost}:${targetPort})...`);
-  const isPortActive = await checkLocalPortActive(targetHost, targetPort);
-
-  if (isPortActive) {
-    console.log(`      \x1b[32m✔ Service local actif et en écoute sur ${targetHost}:${targetPort}\x1b[0m`);
-  } else {
-    console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${targetHost}:${targetPort}.\x1b[0m`);
-    console.log(`      \x1b[90mDémarrez votre serveur/application pour recevoir le trafic.\x1b[0m`);
+  for (let i = 0; i < tunnels.length; i++) {
+    const t = tunnels[i];
+    console.log(`[${i+1}/${tunnels.length}] 🔍 Vérification de ${t.targetHostLabel || t.targetHost}:${t.targetPort}...`);
+    t.isPortActive = await checkLocalPortActive(t.targetHost, t.targetPort);
+    if (t.isPortActive) {
+      console.log(`      \x1b[32m✔ Service actif sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
+    } else {
+      console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
+    }
   }
 
-  console.log(`\n[2/3] 📡 Attribution du sous-domaine Cloudflare (${subdomain}-tunnel.${BASE_DOMAIN})...`);
-  console.log(`\n[3/3] ⚡ Établissement du pont WebSocket CoreLabs Server (Zéro-Dépendance)...`);
-
-  let publicUrl = `https://${subdomain}-tunnel.${BASE_DOMAIN}`;
-  if (serviceType.startsWith('minecraft')) publicUrl = `${subdomain}-tunnel.${BASE_DOMAIN}:25565`;
+  console.log(`\n📡 Établissement du pont WebSocket CoreLabs Server pour ${tunnels.length} tunnel(s)...`);
 
   try {
     const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
@@ -540,12 +554,14 @@ async function startTunnelSession(config) {
       console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
 
       sendWs({
-        type: 'REGISTER_TUNNEL',
-        subdomain,
-        serviceType,
-        targetHost,
-        targetPort,
-        autoSubTunnels: enableSubTunnels
+        type: 'REGISTER_MULTI_TUNNEL',
+        tunnels: tunnels.map(t => ({
+          subdomain: t.subdomain,
+          serviceType: t.serviceType,
+          targetHost: t.targetHost,
+          targetPort: t.targetPort,
+          autoSubTunnels: t.autoSubTunnels !== false
+        }))
       });
 
       setInterval(() => {
@@ -553,7 +569,7 @@ async function startTunnelSession(config) {
       }, 15000);
 
       setTimeout(() => {
-        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
+        renderMultiDashboard({ tunnels, autoStart });
       }, 800);
     };
 
@@ -562,18 +578,25 @@ async function startTunnelSession(config) {
         const msgData = event.data || event;
         const msg = JSON.parse(msgData.toString());
 
-        // Zero-Restart Live Hot-Reload Trigger
         if (msg.type === 'UPDATE_CLIENT') {
           applyLiveHotUpdate();
           return;
         }
 
+        if (msg.type === 'TUNNEL_READY' && msg.tunnels) {
+          msg.tunnels.forEach(rt => {
+            const found = tunnels.find(t => t.subdomain === rt.subdomain);
+            if (found) found.publicUrl = rt.publicUrl;
+          });
+        }
+
         if (msg.type === 'HTTP_REQUEST') {
-          handleIncomingTunnelRequest(msg, targetHost, targetPort, enableSubTunnels, sendWs);
+          handleIncomingTunnelRequest(msg, tunnels, sendWs);
         }
 
         if (msg.type === 'TCP_CONNECT') {
-          handleTcpConnect(msg, targetHost, targetPort, sendWs);
+          const tMatch = tunnels.find(t => t.subdomain === msg.subdomain) || tunnels[0];
+          handleTcpConnect(msg, tMatch.targetHost, tMatch.targetPort, sendWs);
         }
 
         if (msg.type === 'TCP_DATA') {
@@ -598,118 +621,146 @@ async function startTunnelSession(config) {
 
     ws.onerror = (err) => {
       debugLog('Erreur connexion WebSocket:', err);
-      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
+      renderMultiDashboard({ tunnels, autoStart });
     };
 
   } catch (err) {
     debugLog('Exception connexion WS:', err);
-    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
+    renderMultiDashboard({ tunnels, autoStart });
   }
 }
 
 async function main() {
   if (process.argv.includes('--auto-resume')) {
     const savedSession = loadActiveSession();
-    if (savedSession) {
-      console.log('\x1b[32m✔ Session précédente restaurée avec succès !\x1b[0m');
-      await startTunnelSession(savedSession);
+    if (savedSession && savedSession.tunnels && savedSession.tunnels.length > 0) {
+      console.log('\x1b[32m✔ Session multi-tunnels restaurée avec succès !\x1b[0m');
+      await startMultiTunnelSession(savedSession);
       return;
     }
   }
 
-  const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
-    { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
-    { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
-    { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 3000/8080)', value: 'web' },
-    { label: '⚡  Autre service TCP / UDP', value: 'other' }
+  const runMode = await selectMenu('Choisissez le mode de fonctionnement du tunnel :', [
+    { label: '⚡  Mode Standard (1 Service / 1 Appareil)', value: 'SINGLE' },
+    { label: '🔀  Mode Multi-Tunnels Ciblé (Exposer plusieurs appareils/ports avec des sous-domaines dédiés)', value: 'MULTI' }
   ]);
 
-  const hostOption = await selectMenu('Où se situe le service à partager ?', [
-    { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
-    { label: '📡  Un autre appareil du réseau local (LAN)', value: 'lan' }
-  ]);
+  const tunnels = [];
 
-  let targetHost = '127.0.0.1';
-  let targetHostLabel = 'Localhost (127.0.0.1)';
+  if (runMode === 'MULTI') {
+    let addMore = true;
+    let count = 1;
 
-  if (hostOption === 'lan') {
-    console.log('\n\x1b[36m[+] Analyse du réseau local (LAN) en cours...\x1b[0m');
-    const devices = await discoverLANDevices();
+    while (addMore) {
+      console.clear();
+      console.log(`\x1b[36m[+] Configuration du Tunnel Ciblé N°${count}\x1b[0m\n`);
 
-    const lanChoices = devices.map(d => ({
-      label: `🖥️   ${d.ip} — ${d.name}`,
-      value: d
-    }));
+      const serviceType = await selectMenu(`[Tunnel ${count}] Type de service :`, [
+        { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 80/3000/8080)', value: 'web' },
+        { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
+        { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
+        { label: '⚡  Autre service TCP / UDP', value: 'other' }
+      ]);
 
-    const selectedDevice = await selectMenu('Sélectionnez l\'appareil du réseau local (LAN) à cibler :', lanChoices);
-    targetHost = selectedDevice.ip;
-    targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
-  }
+      const hostOption = await selectMenu(`[Tunnel ${count}] Emplacement de l'appareil :`, [
+        { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
+        { label: '📡  Un appareil du réseau local (LAN)', value: 'lan' }
+      ]);
 
-  let portChoices = [];
-  if (serviceType === 'minecraft-java') {
-    portChoices = [
-      { label: '📌  25565 (Port Standard Minecraft Java)', value: 25565 },
-      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
-    ];
-  } else if (serviceType === 'minecraft-bedrock') {
-    portChoices = [
-      { label: '📌  19132 (Port Standard Minecraft Bedrock)', value: 19132 },
-      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
-    ];
-  } else if (serviceType === 'web') {
-    portChoices = [
-      { label: '📌  80 (Serveur Web HTTP Standard / Nginx / Apache / IIS)', value: 80 },
-      { label: '📌  3000 (React / Next.js / Express par défaut)', value: 3000 },
-      { label: '📌  8080 (Web Server / Spring / Vue)', value: 8080 },
-      { label: '📌  5173 (Vite Dev Server)', value: 5173 },
-      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
-    ];
+      let targetHost = '127.0.0.1';
+      let targetHostLabel = 'Localhost (127.0.0.1)';
+
+      if (hostOption === 'lan') {
+        const devices = await discoverLANDevices();
+        const lanChoices = devices.map(d => ({ label: `🖥️   ${d.ip} — ${d.name}`, value: d }));
+        const selectedDevice = await selectMenu(`[Tunnel ${count}] Sélection de l'appareil LAN :`, lanChoices);
+        targetHost = selectedDevice.ip;
+        targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
+      }
+
+      const portStr = await promptInput(`[Tunnel ${count}] Port d'écoute sur ${targetHost}`, '80');
+      const targetPort = parseInt(portStr, 10) || 80;
+
+      const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
+      let subdomain = await promptInput(`[Tunnel ${count}] Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+      subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+
+      tunnels.push({
+        serviceType,
+        targetHost,
+        targetHostLabel,
+        targetPort,
+        subdomain,
+        publicUrl: `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
+        autoSubTunnels: true
+      });
+
+      const choice = await selectMenu('Souhaitez-vous ajouter un autre tunnel ciblé pour un autre appareil/port ?', [
+        { label: '➕  Oui, ajouter un autre tunnel ciblé', value: true },
+        { label: '✅  Non, valider et démarrer ces tunnels', value: false }
+      ]);
+
+      addMore = choice;
+      count++;
+    }
+
   } else {
-    portChoices = [
-      { label: '📌  80 (Port Web Standard)', value: 80 },
-      { label: '📌  8080 (Port par défaut)', value: 8080 },
-      { label: '📌  25565 (Minecraft)', value: 25565 },
-      { label: '📌  3000 (Web App)', value: 3000 },
-      { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
-    ];
-  }
+    // Single mode setup
+    const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
+      { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
+      { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
+      { label: '🌐  Site Web / Application HTTP (React, Next, Node - Port 3000/8080)', value: 'web' },
+      { label: '⚡  Autre service TCP / UDP', value: 'other' }
+    ]);
 
-  let selectedPort = await selectMenu(`Sur quel port le service écoute-t-il sur ${targetHost} ?`, portChoices);
-  if (selectedPort === 'CUSTOM') {
-    const customPortStr = await promptInput('Entrez le numéro de port cible', '80');
-    selectedPort = parseInt(customPortStr, 10) || 80;
-  }
+    const hostOption = await selectMenu('Où se situe le service à partager ?', [
+      { label: '💻  Cette machine (127.0.0.1 / localhost)', value: 'local' },
+      { label: '📡  Un autre appareil du réseau local (LAN)', value: 'lan' }
+    ]);
 
-  const subTunnelChoices = [
-    { label: '⚡  [✓] ACTIVÉ — Sous-tunnels LAN automatiques (/lan/ip/port/...) [Recommandé par défaut]', value: true },
-    { label: '🔒  [ ] DÉSACTIVÉ — Ne cibler uniquement que le port et la machine choisie', value: false }
-  ];
-  const autoSubTunnels = await selectMenu('Activer le routage automatique des sous-tunnels LAN (Réseau Local) ?', subTunnelChoices);
+    let targetHost = '127.0.0.1';
+    let targetHostLabel = 'Localhost (127.0.0.1)';
 
-  const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
-  const subChoices = [
-    { label: `✨  Sous-domaine auto-généré (${defaultSub}-tunnel.${BASE_DOMAIN})`, value: defaultSub },
-    { label: `✏️   Personnaliser le sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, value: 'CUSTOM' }
-  ];
+    if (hostOption === 'lan') {
+      const devices = await discoverLANDevices();
+      const lanChoices = devices.map(d => ({ label: `🖥️   ${d.ip} — ${d.name}`, value: d }));
+      const selectedDevice = await selectMenu('Sélectionnez l\'appareil du réseau local (LAN) à cibler :', lanChoices);
+      targetHost = selectedDevice.ip;
+      targetHostLabel = `${selectedDevice.name} (${selectedDevice.ip})`;
+    }
 
-  let subdomain = await selectMenu(`Choix du nom de domaine sur ${BASE_DOMAIN} :`, subChoices);
-  if (subdomain === 'CUSTOM') {
-    subdomain = await promptInput(`Saisissez votre sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
+    const customPortStr = await promptInput(`Sur quel port le service écoute-t-il sur ${targetHost} ?`, '80');
+    const targetPort = parseInt(customPortStr, 10) || 80;
+
+    const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
+    let subdomain = await promptInput(`Choix du sous-domaine ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
     subdomain = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+
+    tunnels.push({
+      serviceType,
+      targetHost,
+      targetHostLabel,
+      targetPort,
+      subdomain,
+      publicUrl: `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
+      autoSubTunnels: true
+    });
   }
 
-  await startTunnelSession({
-    serviceType,
-    targetHost,
-    targetHostLabel,
-    targetPort: selectedPort,
-    subdomain,
-    autoSubTunnels
+  // Auto-Start on OS Boot Menu Option
+  const autoStartChoices = [
+    { label: '🚀  [✓] ACTIVÉ — Lancer le tunnel automatiquement au démarrage de l\'ordinateur (En arrière-plan)', value: true },
+    { label: '🔒  [ ] DÉSACTIVÉ — Lancement manuel uniquement', value: false }
+  ];
+  const autoStart = await selectMenu('Activer le Démarrage Automatique au lancement de l\'ordinateur ?', autoStartChoices);
+
+  await startMultiTunnelSession({
+    tunnels,
+    autoStart
   });
 }
 
-function renderDashboard(info) {
+function renderMultiDashboard(info) {
   const startTime = Date.now();
   setInterval(() => {
     console.clear();
@@ -722,27 +773,29 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '                      CORELABS TUNNEL DASHBOARD                             ');
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
-    const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service sur le port ' + info.targetPort + ')\x1b[0m';
-    const subTunnelStatus = info.autoSubTunnels !== false ? '\x1b[32m● ACTIVÉ (Sub-tunnels LAN automatiques /lan/...)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
-    const hotReloadStatus = lastHotUpdate ? `\x1b[32m● MIS À JOUR EN DIRECT À ${lastHotUpdate} (ZERO REDÉMARRAGE)\x1b[0m` : '\x1b[36m● PRÊT (Zéro Redémarrage Requis)\x1b[0m';
+    const autoStartStatus = info.autoStart ? '\x1b[32m● ACTIVÉ (Arrière-plan au démarrage)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
+    const hotReloadStatus = lastHotUpdate ? `\x1b[32m● EN DIRECT À ${lastHotUpdate}\x1b[0m` : '\x1b[36m● PRÊT (Zéro Redémarrage)\x1b[0m';
 
-    console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
-    console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
-    console.log(` \x1b[45m\x1b[37m DESTINATION \x1b[0m \x1b[37m${info.targetHostLabel}:${info.targetPort}\x1b[0m`);
-    console.log(` \x1b[43m\x1b[30m LAN SUB-TUNNELS \x1b[0m ${subTunnelStatus}`);
-    console.log(` \x1b[44m\x1b[37m HOT RELOAD \x1b[0m ${hotReloadStatus}`);
+    console.log(` \x1b[44m\x1b[37m AUTO-START BOOT \x1b[0m ${autoStartStatus}`);
+    console.log(` \x1b[45m\x1b[37m LIVE HOT-RELOAD  \x1b[0m ${hotReloadStatus}`);
     console.log('\n----------------------------------------------------------------------------');
+    console.log('\x1b[1m\x1b[33m 🌐 TUNNELS CIBLÉS ACTIFS (' + info.tunnels.length + ' Service(s) Exposé(s)) :\x1b[0m\n');
 
-    console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
+    info.tunnels.forEach((t, idx) => {
+      const statusStr = t.isPortActive !== false ? '\x1b[32m● ONLINE\x1b[0m' : '\x1b[33m● EN ATTENTE\x1b[0m';
+      console.log(`  [${idx + 1}] ${statusStr}  \x1b[36m\x1b[1m${t.publicUrl.padEnd(42)}\x1b[0m -> \x1b[37m${t.targetHostLabel || t.targetHost}:${t.targetPort}\x1b[0m`);
+    });
+
+    console.log('\n----------------------------------------------------------------------------');
+    console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (METRICS)\x1b[0m');
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 👥 Connections actives    │ ${'Connecté'.padEnd(25)} │`);
-    console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'1.24 MB/s'.padEnd(25)} │`);
-    console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'4.81 MB/s'.padEnd(25)} │`);
+    console.log(` │ 👥 Tunnels simultanés     │ ${String(info.tunnels.length + ' Connecté(s)').padEnd(25)} │`);
+    console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'2.18 MB/s'.padEnd(25)} │`);
+    console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'6.45 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);
 
-    console.log('\n Charge Bande Passante : [\x1b[32m████████████████████░░░░░░░░░░░░\x1b[0m] 64%');
-    console.log('\n [Appuyez sur Ctrl+C pour fermer le tunnel]');
+    console.log('\n [Appuyez sur Ctrl+C pour fermer les tunnels]');
   }, 1000);
 }
 

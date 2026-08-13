@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.7.0';
+const SERVER_VERSION = '1.8.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -107,7 +107,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-PAGE & REMOTE LAN PC HTTP PROXY
+// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & TARGETED ROUTER
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -332,41 +332,57 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 // WEBSOCKET BRIDGE
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
-  let assignedSubdomain: string | null = null;
+  const registeredSubdomains: string[] = [];
 
   ws.on('message', async (data: string) => {
     try {
       const msg = JSON.parse(data.toString());
 
-      if (msg.type === 'REGISTER_TUNNEL') {
-        const { subdomain, serviceType, targetHost, targetPort, autoSubTunnels } = msg;
-        const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
+      if (msg.type === 'REGISTER_TUNNEL' || msg.type === 'REGISTER_MULTI_TUNNEL') {
+        const tunnelsToRegister = msg.tunnels || [{
+          subdomain: msg.subdomain,
+          serviceType: msg.serviceType,
+          targetHost: msg.targetHost,
+          targetPort: msg.targetPort,
+          autoSubTunnels: msg.autoSubTunnels
+        }];
 
-        await cfManager.createSubdomainRecord(`${cleanSubdomain}-tunnel`);
+        const registeredResults = [];
 
-        assignedSubdomain = cleanSubdomain;
-        activeTunnels.set(cleanSubdomain, {
-          subdomain: cleanSubdomain,
-          ws,
-          targetHost,
-          targetPort,
-          serviceType,
-          autoSubTunnels: autoSubTunnels !== false,
-          connectedAt: new Date(),
-          pendingRequests: new Map()
-        });
+        for (const t of tunnelsToRegister) {
+          const cleanSubdomain = (t.subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
+          await cfManager.createSubdomainRecord(`${cleanSubdomain}-tunnel`);
 
-        let publicUrl = `https://${cleanSubdomain}-tunnel.${BASE_DOMAIN}`;
-        if (serviceType.startsWith('minecraft')) {
-          publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
+          registeredSubdomains.push(cleanSubdomain);
+          activeTunnels.set(cleanSubdomain, {
+            subdomain: cleanSubdomain,
+            ws,
+            targetHost: t.targetHost,
+            targetPort: t.targetPort,
+            serviceType: t.serviceType,
+            autoSubTunnels: t.autoSubTunnels !== false,
+            connectedAt: new Date(),
+            pendingRequests: new Map()
+          });
+
+          let publicUrl = `https://${cleanSubdomain}-tunnel.${BASE_DOMAIN}`;
+          if (t.serviceType && t.serviceType.startsWith('minecraft')) {
+            publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
+          }
+
+          log('INFO', `[Tunnel Registered] Subdomain: ${cleanSubdomain} -> ${t.targetHost}:${t.targetPort} -> Public: ${publicUrl}`);
+
+          registeredResults.push({
+            subdomain: cleanSubdomain,
+            publicUrl,
+            targetHost: t.targetHost,
+            targetPort: t.targetPort
+          });
         }
-
-        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Target: ${targetHost}:${targetPort} -> Public URL: ${publicUrl}`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
-          subdomain: cleanSubdomain,
-          publicUrl,
+          tunnels: registeredResults,
           domain: BASE_DOMAIN,
           serverVersion: SERVER_VERSION
         }));
@@ -374,7 +390,7 @@ wss.on('connection', (ws: WebSocket, req) => {
 
       if (msg.type === 'HTTP_RESPONSE') {
         const { requestId, statusCode, headers, body, isBase64, subdomain } = msg;
-        const session = activeTunnels.get(subdomain || assignedSubdomain || '');
+        const session = activeTunnels.get(subdomain || '');
 
         if (session) {
           const pending = session.pendingRequests.get(requestId);
@@ -434,10 +450,10 @@ wss.on('connection', (ws: WebSocket, req) => {
   });
 
   ws.onclose = () => {
-    if (assignedSubdomain) {
-      activeTunnels.delete(assignedSubdomain);
-      log('INFO', `Tunnel fermé: ${assignedSubdomain}-tunnel.${BASE_DOMAIN}`);
-    }
+    registeredSubdomains.forEach(sub => {
+      activeTunnels.delete(sub);
+      log('INFO', `Tunnel fermé: ${sub}-tunnel.${BASE_DOMAIN}`);
+    });
   };
 });
 
