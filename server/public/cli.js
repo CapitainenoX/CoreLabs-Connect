@@ -333,13 +333,14 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
+// Multi-Page & Link Rewriting Proxy Handler (Adapts to Port 80, 3000, 8080, 443, etc.)
 function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
   const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
 
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
-  forwardHeaders.host = `${targetHost}:${targetPort}`;
+  forwardHeaders.host = (targetPort === 80 || targetPort === 443) ? targetHost : `${targetHost}:${targetPort}`;
   forwardHeaders['x-forwarded-host'] = publicHost;
   forwardHeaders['x-forwarded-proto'] = 'https';
   delete forwardHeaders['accept-encoding'];
@@ -360,16 +361,16 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
       let fullBuffer = Buffer.concat(bodyChunks);
       const contentType = (localRes.headers['content-type'] || '').toLowerCase();
 
+      // If response is HTML, rewrite hardcoded local IPs/ports to the tunnel domain for ALL ports (80, 3000, 8080, etc.)
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
-        const localUrlRegex1 = new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${targetPort}`, 'g');
-        const localUrlRegex2 = new RegExp(`http:\\/\\/localhost:${targetPort}`, 'g');
-        const localUrlRegex3 = new RegExp(`http:\\/\\/${targetHost}:${targetPort}`, 'g');
 
         htmlStr = htmlStr
-          .replace(localUrlRegex1, `https://${publicHost}`)
-          .replace(localUrlRegex2, `https://${publicHost}`)
-          .replace(localUrlRegex3, `https://${publicHost}`);
+          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${targetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/localhost:${targetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/${targetHost}:${targetPort}`, 'g'), `https://${publicHost}`)
+          .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
+          .replace(/http:\/\/localhost/g, `https://${publicHost}`);
 
         fullBuffer = Buffer.from(htmlStr, 'utf-8');
       }
@@ -411,6 +412,12 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
       isBase64: true
     });
   });
+
+  // Forward incoming POST/PUT request body to local application
+  if (reqMsg.body) {
+    const requestBodyBuffer = Buffer.from(reqMsg.body, 'base64');
+    localReq.write(requestBodyBuffer);
+  }
 
   localReq.end();
 }
@@ -458,14 +465,15 @@ async function main() {
     ];
   } else if (serviceType === 'web') {
     portChoices = [
+      { label: '📌  80 (Serveur Web HTTP Standard / Nginx / Apache / IIS)', value: 80 },
       { label: '📌  3000 (React / Next.js / Express par défaut)', value: 3000 },
       { label: '📌  8080 (Web Server / Spring / Vue)', value: 8080 },
-      { label: '📌  80 (Serveur Web HTTP Standard / Nginx)', value: 80 },
       { label: '📌  5173 (Vite Dev Server)', value: 5173 },
       { label: '✏️   Saisir un autre port manuellement', value: 'CUSTOM' }
     ];
   } else {
     portChoices = [
+      { label: '📌  80 (Port Web Standard)', value: 80 },
       { label: '📌  8080 (Port par défaut)', value: 8080 },
       { label: '📌  25565 (Minecraft)', value: 25565 },
       { label: '📌  3000 (Web App)', value: 3000 },
@@ -475,8 +483,8 @@ async function main() {
 
   let selectedPort = await selectMenu(`Sur quel port le service écoute-t-il sur ${targetHost} ?`, portChoices);
   if (selectedPort === 'CUSTOM') {
-    const customPortStr = await promptInput('Entrez le numéro de port cible', '3000');
-    selectedPort = parseInt(customPortStr, 10) || 3000;
+    const customPortStr = await promptInput('Entrez le numéro de port cible', '80');
+    selectedPort = parseInt(customPortStr, 10) || 80;
   }
 
   const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -544,7 +552,6 @@ async function main() {
         const msgData = event.data || event;
         const msg = JSON.parse(msgData.toString());
 
-        // AUTO-UPDATE CLIENT TRIGGER
         if (msg.type === 'UPDATE_CLIENT') {
           autoUpdateAndRestart();
           return;

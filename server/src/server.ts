@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.1.0';
+const SERVER_VERSION = '1.2.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -25,7 +25,11 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
 }
 
 app.use(cors());
-app.use(express.json());
+
+// Raw Body Collector for POST/PUT/PATCH requests
+app.use(express.raw({ type: '*/*', limit: '50mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const publicPath = path.join(__dirname, '../public');
 
@@ -48,7 +52,7 @@ const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
 
 function broadcastClientUpdate(reason: string = 'Mise à jour du serveur') {
-  log('INFO', `[Auto-Update Broadcast] Envoi du signal de mise à jour à tous les clients connectés. Raison: ${reason}`);
+  log('INFO', `[Auto-Update Broadcast] Signal de mise à jour envoyé à tous les clients. Raison: ${reason}`);
   const updatePayload = JSON.stringify({
     type: 'UPDATE_CLIENT',
     version: SERVER_VERSION,
@@ -96,7 +100,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-PAGE HTTP PROXY
+// 1. WILDCARD SUBDOMAIN FULL HTTP & WEBSOCKET PROXY ENGINE
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -108,7 +112,7 @@ app.use((req, res, next) => {
     
     if (sub !== 'tunnel') {
       const requestPath = req.originalUrl || req.url || '/';
-      log('INFO', `[Multi-Page Request] Subdomain: ${sub} Path: ${requestPath} (Method: ${req.method})`);
+      log('INFO', `[Proxy HTTP Stream] Subdomain: ${sub} Path: ${requestPath} (Method: ${req.method})`);
       const session = activeTunnels.get(sub);
 
       if (session && session.ws.readyState === WebSocket.OPEN) {
@@ -129,13 +133,25 @@ app.use((req, res, next) => {
               </html>
             `);
           }
-        }, 12000);
+        }, 15000);
 
         session.pendingRequests.set(requestId, { res, timeoutId });
 
+        // Forward full HTTP request headers and request body (for POST/PUT/PATCH)
         const forwardedHeaders = Object.assign({}, req.headers);
         forwardedHeaders['x-forwarded-host'] = host;
         forwardedHeaders['x-forwarded-proto'] = 'https';
+
+        let requestBodyB64 = '';
+        if (req.body) {
+          if (Buffer.isBuffer(req.body)) {
+            requestBodyB64 = req.body.toString('base64');
+          } else if (typeof req.body === 'object') {
+            requestBodyB64 = Buffer.from(JSON.stringify(req.body)).toString('base64');
+          } else if (typeof req.body === 'string') {
+            requestBodyB64 = Buffer.from(req.body).toString('base64');
+          }
+        }
 
         session.ws.send(JSON.stringify({
           type: 'HTTP_REQUEST',
@@ -143,6 +159,7 @@ app.use((req, res, next) => {
           method: req.method,
           path: requestPath,
           headers: forwardedHeaders,
+          body: requestBodyB64,
           subdomain: sub,
           publicHost: host
         }));
@@ -373,7 +390,10 @@ wss.on('connection', (ws: WebSocket, req) => {
                     headerValue = headerValue
                       .replace(/http:\/\/127\.0\.0\.1:\d+/g, `https://${publicHost}`)
                       .replace(/http:\/\/localhost:\d+/g, `https://${publicHost}`)
-                      .replace(new RegExp(`http://${session.targetHost}:${session.targetPort}`, 'g'), `https://${publicHost}`);
+                      .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
+                      .replace(/http:\/\/localhost/g, `https://${publicHost}`)
+                      .replace(new RegExp(`http://${session.targetHost}:${session.targetPort}`, 'g'), `https://${publicHost}`)
+                      .replace(new RegExp(`http://${session.targetHost}`, 'g'), `https://${publicHost}`);
                     log('INFO', `[Redirect Rewritten] Location header -> ${headerValue}`);
                   }
 
@@ -527,7 +547,6 @@ mcTcpServer.listen(MC_TCP_PORT, () => {
   log('INFO', `[Minecraft TCP Engine] Écoute des joueurs Minecraft sur le port TCP ${MC_TCP_PORT}`);
 });
 
-// Process shutdown broadcast trigger
 process.on('SIGTERM', () => {
   broadcastClientUpdate('Redémarrage serveur (SIGTERM)');
   setTimeout(() => process.exit(0), 500);
