@@ -35,6 +35,48 @@ function cleanSubdomainInput(inputStr) {
   return str;
 }
 
+function findLocalXamppHtdocsFolder() {
+  const possiblePaths = [
+    'C:\\xampp\\htdocs',
+    'D:\\xampp\\htdocs',
+    'E:\\xampp\\htdocs',
+    'C:\\wamp64\\www',
+    'C:\\wamp\\www',
+    '/var/www/html',
+    '/opt/lampp/htdocs'
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function autoDetectSubfolderForSubdomain(subdomainStr) {
+  const htdocs = findLocalXamppHtdocsFolder();
+  if (!htdocs) return null;
+  try {
+    const items = fs.readdirSync(htdocs);
+    const cleanSub = cleanSubdomainInput(subdomainStr);
+    
+    // Exact or partial folder match (e.g. "koogle")
+    const match = items.find(item => {
+      if (item === 'dashboard' || item === 'xampp' || item.startsWith('.')) return false;
+      const fullP = path.join(htdocs, item);
+      return fs.statSync(fullP).isDirectory() && cleanSubdomainInput(item) === cleanSub;
+    });
+    if (match) return `/${match}`;
+
+    // Single custom subfolder fallback
+    const validFolders = items.filter(item => {
+      if (item === 'dashboard' || item === 'xampp' || item.startsWith('.')) return false;
+      const fullP = path.join(htdocs, item);
+      return fs.statSync(fullP).isDirectory();
+    });
+    if (validFolders.length === 1) return `/${validFolders[0]}`;
+  } catch (err) {}
+  return null;
+}
+
 function rewriteLocationHeader(locationHeader, publicHost, targetHost) {
   if (!locationHeader || typeof locationHeader !== 'string') return locationHeader;
   
@@ -60,7 +102,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.7
+                     T U N N E L   v2.8 (Universal Adaptive)
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -472,7 +514,6 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// XAMPP / Apache Tree-Structure Subfolder Auto-Fallback Engine
 function fetchFromLocalServer(actualTargetHost, actualTargetPort, pathToSend, reqMsg, publicHost, targetTunnel) {
   return new Promise((resolve) => {
     const forwardHeaders = Object.assign({}, reqMsg.headers || {});
@@ -520,6 +561,7 @@ function fetchFromLocalServer(actualTargetHost, actualTargetPort, pathToSend, re
   });
 }
 
+// Universal Adaptive Multi-Page XAMPP / Apache / Node Handler
 async function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
@@ -530,7 +572,9 @@ async function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   const targetTunnel = tunnelsList.find(t => cleanSubdomainInput(t.subdomain) === cleanSub) || tunnelsList[0];
   let actualTargetHost = targetTunnel.targetHost || '127.0.0.1';
   let actualTargetPort = targetTunnel.targetPort || 80;
-  let targetSubfolder = targetTunnel.targetSubfolder || '';
+
+  // Auto-detect XAMPP subfolder matching subdomain if not set
+  let detectedFolder = targetTunnel.targetSubfolder || autoDetectSubfolderForSubdomain(cleanSub) || '';
 
   if (targetTunnel.autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
     const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
@@ -538,15 +582,14 @@ async function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       actualTargetHost = lanMatch[1].replace(/-/g, '.');
       actualTargetPort = parseInt(lanMatch[2], 10) || 80;
       reqPath = lanMatch[3] || '/';
-      targetSubfolder = '';
+      detectedFolder = '';
       debugLog(`[LAN Sub-Tunnel Triggered] Route vers appareil LAN -> ${actualTargetHost}:${actualTargetPort}${reqPath}`);
     }
   }
 
-  // Prepend target subfolder if configured
   let primaryPath = reqPath;
-  if (targetSubfolder) {
-    const cleanFolder = targetSubfolder.startsWith('/') ? targetSubfolder : `/${targetSubfolder}`;
+  if (detectedFolder) {
+    const cleanFolder = detectedFolder.startsWith('/') ? detectedFolder : `/${detectedFolder}`;
     if (!reqPath.startsWith(cleanFolder)) {
       primaryPath = `${cleanFolder}${reqPath.startsWith('/') ? '' : '/'}${reqPath}`;
     }
@@ -554,9 +597,9 @@ async function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
 
   let resObj = await fetchFromLocalServer(actualTargetHost, actualTargetPort, primaryPath, reqMsg, publicHost, targetTunnel);
 
-  // XAMPP Tree-Structure Auto-Fallback: If primary path got 404 and reqPath starts with /koogle or subfolder, try without subfolder, or vice versa
+  // Universal Adaptive Auto-Fallback: If primary path got 404, try raw reqPath or subfolder path
   if (resObj.statusCode === 404 && primaryPath !== reqPath) {
-    debugLog(`[XAMPP Tree Fallback] 404 sur ${primaryPath}, essai de ${reqPath}...`);
+    debugLog(`[Adaptive Fallback] 404 sur ${primaryPath}, tentative sur ${reqPath}...`);
     const fallbackObj = await fetchFromLocalServer(actualTargetHost, actualTargetPort, reqPath, reqMsg, publicHost, targetTunnel);
     if (fallbackObj.statusCode !== 404) {
       resObj = fallbackObj;
@@ -758,7 +801,7 @@ async function main() {
     }
   }
 
-  // STYLISH 4-STEP GUIDED WIZARD
+  // STYLISH 4-STEP GUIDED WIZARD (ZERO-CONFIG UNIVERSAL ADAPTIVE)
   const serviceTypeChoice = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
     { label: '🌐  Site Web / App HTTP / XAMPP (Port 80/3000/8080)', value: 'web' },
     { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
@@ -793,9 +836,6 @@ async function main() {
       const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, '80');
       const targetPort = parseInt(portStr, 10) || 80;
 
-      renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOSSIER XAMPP/WAMP (${count})`);
-      const subfolderStr = await promptInput(`Si votre site est dans un sous-dossier XAMPP (ex: /koogle), indiquez-le`, '', `ÉTAPE 3/4 — SOUS-DOSSIER (${count})`);
-
       renderAsciiBanner(`ÉTAPE 3/4 — SOUS-DOMAINE DÉDIÉ (${count})`);
       const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
       let rawSubdomain = await promptInput(`Sous-domaine dédié ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
@@ -806,7 +846,6 @@ async function main() {
         targetHost,
         targetHostLabel,
         targetPort,
-        targetSubfolder: subfolderStr,
         subdomain,
         publicUrl: `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
         autoSubTunnels: true
@@ -845,12 +884,6 @@ async function main() {
     const portStr = await promptInput(`Port d'écoute sur ${targetHost}`, defaultPort);
     const targetPort = parseInt(portStr, 10) || parseInt(defaultPort, 10);
 
-    renderAsciiBanner('ÉTAPE 3/4 — SOUS-DOSSIER XAMPP/WAMP (OPTIONNEL)');
-    let targetSubfolder = '';
-    if (serviceTypeChoice === 'web') {
-      targetSubfolder = await promptInput(`Si votre site est dans un sous-dossier (ex: /koogle), indiquez-le (Entrée pour aucun)`, '');
-    }
-
     renderAsciiBanner('ÉTAPE 3/4 — NOM DE L\'URL PUBLIC');
     const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
     let rawSubdomain = await promptInput(`Nom de votre sous-domaine public ([nom]-tunnel.${BASE_DOMAIN})`, defaultSub);
@@ -861,7 +894,6 @@ async function main() {
       targetHost,
       targetHostLabel,
       targetPort,
-      targetSubfolder,
       subdomain,
       publicUrl: serviceTypeChoice.startsWith('minecraft') ? `${subdomain}-tunnel.${BASE_DOMAIN}:25565` : `https://${subdomain}-tunnel.${BASE_DOMAIN}`,
       autoSubTunnels: true
@@ -897,8 +929,7 @@ function renderMultiDashboard(info) {
 
     info.tunnels.forEach((t, idx) => {
       const statusStr = t.isPortActive !== false ? '\x1b[32m● ONLINE\x1b[0m' : '\x1b[33m● EN ATTENTE\x1b[0m';
-      const subFolderNote = t.targetSubfolder ? ` \x1b[90m(${t.targetSubfolder})\x1b[0m` : '';
-      console.log(`  [${idx + 1}] ${statusStr}  \x1b[36m\x1b[1m${t.publicUrl.padEnd(42)}\x1b[0m -> \x1b[37m${t.targetHostLabel || t.targetHost}:${t.targetPort}${subFolderNote}\x1b[0m`);
+      console.log(`  [${idx + 1}] ${statusStr}  \x1b[36m\x1b[1m${t.publicUrl.padEnd(42)}\x1b[0m -> \x1b[37m${t.targetHostLabel || t.targetHost}:${t.targetPort}\x1b[0m`);
     });
 
     console.log('----------------------------------------------------------------------------');
@@ -910,7 +941,7 @@ function renderMultiDashboard(info) {
 
     console.log(` ┌───────────────────────────┬───────────────────────────┐`);
     console.log(` │ ⏱️  Temps d'activité     │ ${(hrs + ':' + mins + ':' + secs).padEnd(25)} │`);
-    console.log(` │ 📂 Support Sous-Dossiers  │ ${'XAMPP / Apache Tree Prêt'.padEnd(25)} │`);
+    console.log(` │ 📂 Mode Détection        │ ${'Adaptatif Automatique Zero-Config'.padEnd(25)} │`);
     console.log(` │ ⬇️  Vitesse Télécharg.   │ ${'3.42 MB/s'.padEnd(25)} │`);
     console.log(` │ ⬆️  Vitesse Envoi (UL)   │ ${'8.12 MB/s'.padEnd(25)} │`);
     console.log(` └───────────────────────────┴───────────────────────────┘`);
