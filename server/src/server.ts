@@ -14,7 +14,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.3.0';
+const SERVER_VERSION = '1.4.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -26,7 +26,6 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
 
 app.use(cors());
 
-// Safe Raw Buffer Collector (Preserves POST/PUT data without breaking streams)
 app.use((req, res, next) => {
   const chunks: Buffer[] = [];
   req.on('data', chunk => chunks.push(chunk));
@@ -49,6 +48,7 @@ interface TunnelSession {
   targetHost: string;
   targetPort: number;
   serviceType: string;
+  autoSubTunnels: boolean;
   connectedAt: Date;
   pendingRequests: Map<string, PendingRequest>;
 }
@@ -107,7 +107,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN FULL HTTP & WEBSOCKET PROXY ENGINE
+// 1. WILDCARD SUBDOMAIN MULTI-PAGE & LAN SUB-TUNNEL HTTP PROXY
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -339,7 +339,7 @@ wss.on('connection', (ws: WebSocket, req) => {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'REGISTER_TUNNEL') {
-        const { subdomain, serviceType, targetHost, targetPort } = msg;
+        const { subdomain, serviceType, targetHost, targetPort, autoSubTunnels } = msg;
         const cleanSubdomain = (subdomain || `core-${Math.floor(1000 + Math.random() * 9000)}`).toLowerCase();
 
         await cfManager.createSubdomainRecord(`${cleanSubdomain}-tunnel`);
@@ -351,6 +351,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           targetHost,
           targetPort,
           serviceType,
+          autoSubTunnels: autoSubTunnels !== false, // Enabled by default
           connectedAt: new Date(),
           pendingRequests: new Map()
         });
@@ -360,7 +361,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
         }
 
-        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Public URL: ${publicUrl}`);
+        log('INFO', `[Tunnel Enregistré] Subdomain: ${cleanSubdomain} -> Public URL: ${publicUrl} (AutoSubTunnels: ${autoSubTunnels !== false})`);
 
         ws.send(JSON.stringify({
           type: 'TUNNEL_READY',
@@ -406,8 +407,6 @@ wss.on('connection', (ws: WebSocket, req) => {
 
             const responseBuffer = isBase64 ? Buffer.from(body || '', 'base64') : Buffer.from(body || '');
             pending.res.setHeader('content-length', responseBuffer.length);
-            
-            // Handle redirects (301, 302, 303, 307, 308) seamlessly for Post-Redirect-Get
             pending.res.status(statusCode || 200).send(responseBuffer);
           }
         }

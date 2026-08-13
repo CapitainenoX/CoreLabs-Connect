@@ -30,7 +30,10 @@ function saveActiveSession(sessionInfo) {
     const dir = getInstallDir();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const sessionPath = path.join(dir, 'active-session.json');
-    fs.writeFileSync(sessionPath, JSON.stringify(sessionInfo, null, 2));
+    
+    // Ensure autoSubTunnels defaults to true if undefined
+    const finalSession = Object.assign({ autoSubTunnels: true }, sessionInfo);
+    fs.writeFileSync(sessionPath, JSON.stringify(finalSession, null, 2));
   } catch (err) {
     debugLog('Erreur sauvegarde session:', err.message);
   }
@@ -41,7 +44,9 @@ function loadActiveSession() {
     const sessionPath = path.join(getInstallDir(), 'active-session.json');
     if (fs.existsSync(sessionPath)) {
       const data = fs.readFileSync(sessionPath, 'utf-8');
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      if (parsed.autoSubTunnels === undefined) parsed.autoSubTunnels = true;
+      return parsed;
     }
   } catch (err) {
     debugLog('Erreur lecture session:', err.message);
@@ -60,7 +65,7 @@ function autoUpdateAndRestart() {
     fileStream.on('finish', () => {
       fileStream.close(() => {
         console.log('\x1b[32m✔ Mise à jour appliquée avec succès !\x1b[0m');
-        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel...\x1b[0m\n');
+        console.log('\x1b[33m🔄 Redémarrage et relance automatique du tunnel (LAN Sub-Tunnels ACTIVÉ par défaut)...\x1b[0m\n');
         
         const child = spawn(process.argv[0], [__filename, '--auto-resume'], {
           detached: true,
@@ -365,22 +370,37 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessage) {
+// Multi-Page, Dynamic Link Rewriting & LAN Sub-Tunnel Proxy Handler
+function handleIncomingTunnelRequest(reqMsg, defaultHost, defaultPort, autoSubTunnels, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}]`, { method: reqMsg.method, path: reqMsg.path });
 
   const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
+  let reqPath = reqMsg.path || '/';
+  let actualTargetHost = defaultHost;
+  let actualTargetPort = defaultPort;
+
+  // Dynamic LAN Sub-Tunnel Path Parser: /lan/192-168-1-50/8080/path...
+  if (autoSubTunnels !== false && reqPath.startsWith('/lan/')) {
+    const lanMatch = reqPath.match(/^\/lan\/(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\/(\d+)(\/.*)?$/);
+    if (lanMatch) {
+      actualTargetHost = lanMatch[1].replace(/-/g, '.');
+      actualTargetPort = parseInt(lanMatch[2], 10) || 80;
+      reqPath = lanMatch[3] || '/';
+      debugLog(`[LAN Sub-Tunnel Triggered] Route vers appareil LAN -> ${actualTargetHost}:${actualTargetPort}${reqPath}`);
+    }
+  }
 
   const forwardHeaders = Object.assign({}, reqMsg.headers || {});
-  forwardHeaders.host = (targetPort === 80 || targetPort === 443) ? targetHost : `${targetHost}:${targetPort}`;
+  forwardHeaders.host = (actualTargetPort === 80 || actualTargetPort === 443) ? actualTargetHost : `${actualTargetHost}:${actualTargetPort}`;
   forwardHeaders['x-forwarded-host'] = publicHost;
   forwardHeaders['x-forwarded-proto'] = 'https';
   delete forwardHeaders['accept-encoding'];
   delete forwardHeaders['connection'];
 
   const options = {
-    hostname: targetHost,
-    port: targetPort,
-    path: reqMsg.path || '/',
+    hostname: actualTargetHost,
+    port: actualTargetPort,
+    path: reqPath,
     method: reqMsg.method || 'GET',
     headers: forwardHeaders
   };
@@ -395,19 +415,30 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
       if (contentType.includes('text/html')) {
         let htmlStr = fullBuffer.toString('utf-8');
 
+        // Main target host rewriting
         htmlStr = htmlStr
-          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${targetPort}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/localhost:${targetPort}`, 'g'), `https://${publicHost}`)
-          .replace(new RegExp(`http:\\/\\/${targetHost}:${targetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/127\\.0\\.0\\.1:${actualTargetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/localhost:${actualTargetPort}`, 'g'), `https://${publicHost}`)
+          .replace(new RegExp(`http:\\/\\/${actualTargetHost}:${actualTargetPort}`, 'g'), `https://${publicHost}`)
           .replace(/http:\/\/127\.0\.0\.1/g, `https://${publicHost}`)
           .replace(/http:\/\/localhost/g, `https://${publicHost}`);
+
+        // Automatic LAN IP Sub-Tunnel link rewriting (e.g. http://192.168.1.50:8080 -> /lan/192-168-1-50/8080)
+        if (autoSubTunnels !== false) {
+          const lanIpRegex = /http:\/\/((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::(\d+))?/g;
+          htmlStr = htmlStr.replace(lanIpRegex, (_, ip, port) => {
+            const ipHyphen = ip.replace(/\./g, '-');
+            const targetPortStr = port || '80';
+            return `https://${publicHost}/lan/${ipHyphen}/${targetPortStr}`;
+          });
+        }
 
         fullBuffer = Buffer.from(htmlStr, 'utf-8');
       }
 
       const b64Data = fullBuffer.toString('base64');
       
-      debugLog(`Page locale chargée [${reqMsg.requestId}] Path: ${reqMsg.path} Status: ${localRes.statusCode}`);
+      debugLog(`Page locale chargée [${reqMsg.requestId}] Target: ${actualTargetHost}:${actualTargetPort} Path: ${reqPath} Status: ${localRes.statusCode}`);
       
       sendWsMessage({
         type: 'HTTP_RESPONSE',
@@ -422,7 +453,7 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
   });
 
   localReq.on('error', (err) => {
-    debugLog(`Erreur page locale [${reqMsg.requestId}] Path: ${reqMsg.path}`, err.message);
+    debugLog(`Erreur page locale [${reqMsg.requestId}] Path: ${reqPath}`, err.message);
     sendWsMessage({
       type: 'HTTP_RESPONSE',
       requestId: reqMsg.requestId,
@@ -433,8 +464,8 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
         <html>
           <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
             <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Page Inaccessible (502)</h2>
-              <p style="color:#aaa;">Impossible de contacter l'application locale sur <b>${targetHost}:${targetPort}</b> pour la page <b>${reqMsg.path}</b></p>
+              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Appareil/Page Inaccessible (502)</h2>
+              <p style="color:#aaa;">Impossible de contacter le service local sur <b>${actualTargetHost}:${actualTargetPort}</b> pour le chemin <b>${reqPath}</b></p>
             </div>
           </body>
         </html>
@@ -452,10 +483,11 @@ function handleIncomingTunnelRequest(reqMsg, targetHost, targetPort, sendWsMessa
 }
 
 async function startTunnelSession(config) {
-  const { serviceType, targetHost, targetHostLabel, targetPort, subdomain } = config;
+  const { serviceType, targetHost, targetHostLabel, targetPort, subdomain, autoSubTunnels } = config;
+  const enableSubTunnels = autoSubTunnels !== false;
 
   // Save session configuration for seamless auto-resume after updates
-  saveActiveSession(config);
+  saveActiveSession(Object.assign({}, config, { autoSubTunnels: enableSubTunnels }));
 
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', '======================================================');
@@ -493,7 +525,8 @@ async function startTunnelSession(config) {
         subdomain,
         serviceType,
         targetHost,
-        targetPort
+        targetPort,
+        autoSubTunnels: enableSubTunnels
       });
 
       setInterval(() => {
@@ -501,7 +534,7 @@ async function startTunnelSession(config) {
       }, 15000);
 
       setTimeout(() => {
-        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+        renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
       }, 800);
     };
 
@@ -516,7 +549,7 @@ async function startTunnelSession(config) {
         }
 
         if (msg.type === 'HTTP_REQUEST') {
-          handleIncomingTunnelRequest(msg, targetHost, targetPort, sendWs);
+          handleIncomingTunnelRequest(msg, targetHost, targetPort, enableSubTunnels, sendWs);
         }
 
         if (msg.type === 'TCP_CONNECT') {
@@ -545,17 +578,16 @@ async function startTunnelSession(config) {
 
     ws.onerror = (err) => {
       debugLog('Erreur connexion WebSocket:', err);
-      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+      renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
     };
 
   } catch (err) {
     debugLog('Exception connexion WS:', err);
-    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive });
+    renderDashboard({ subdomain, serviceType, targetHost, targetHostLabel, targetPort, publicUrl, isPortActive, autoSubTunnels: enableSubTunnels });
   }
 }
 
 async function main() {
-  // Check if auto-resuming from update
   if (process.argv.includes('--auto-resume')) {
     const savedSession = loadActiveSession();
     if (savedSession) {
@@ -629,6 +661,13 @@ async function main() {
     selectedPort = parseInt(customPortStr, 10) || 80;
   }
 
+  // Toggle for LAN Sub-Tunnels Dynamic Auto-Routing
+  const subTunnelChoices = [
+    { label: '⚡  [✓] ACTIVÉ — Sous-tunnels LAN automatiques (/lan/ip/port/...) [Recommandé par défaut]', value: true },
+    { label: '🔒  [ ] DÉSACTIVÉ — Ne cibler uniquement que le port et la machine choisie', value: false }
+  ];
+  const autoSubTunnels = await selectMenu('Activer le routage automatique des sous-tunnels LAN (Réseau Local) ?', subTunnelChoices);
+
   const defaultSub = `core-${Math.floor(1000 + Math.random() * 9000)}`;
   const subChoices = [
     { label: `✨  Sous-domaine auto-généré (${defaultSub}-tunnel.${BASE_DOMAIN})`, value: defaultSub },
@@ -646,7 +685,8 @@ async function main() {
     targetHost,
     targetHostLabel,
     targetPort: selectedPort,
-    subdomain
+    subdomain,
+    autoSubTunnels
   });
 }
 
@@ -664,10 +704,12 @@ function renderDashboard(info) {
     console.log('\x1b[36m%s\x1b[0m', '============================================================================\n');
 
     const localStatus = info.isPortActive ? '\x1b[32m● ONLINE (Service local actif)\x1b[0m' : '\x1b[33m● TUNNEL ACTIF (En attente du service sur le port ' + info.targetPort + ')\x1b[0m';
+    const subTunnelStatus = info.autoSubTunnels !== false ? '\x1b[32m● ACTIVÉ (Sub-tunnels LAN automatiques /lan/...)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
 
     console.log(` \x1b[42m\x1b[30m STATUS \x1b[0m ${localStatus}`);
     console.log(` \x1b[46m\x1b[30m PUBLIC URL \x1b[0m  \x1b[36m\x1b[1m${info.publicUrl}\x1b[0m`);
     console.log(` \x1b[45m\x1b[37m DESTINATION \x1b[0m \x1b[37m${info.targetHostLabel}:${info.targetPort}\x1b[0m`);
+    console.log(` \x1b[43m\x1b[30m LAN SUB-TUNNELS \x1b[0m ${subTunnelStatus}`);
     console.log('\n----------------------------------------------------------------------------');
 
     console.log('\x1b[1m 📊 TRANSFERT DE DONNÉES EN TEMPS RÉEL (PLAYIT-STYLE METRICS)\x1b[0m');
