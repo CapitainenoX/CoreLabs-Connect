@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '2.4.0';
+const SERVER_VERSION = '2.5.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -23,6 +23,22 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
   const color = level === 'ERROR' ? '\x1b[31m' : level === 'WARN' ? '\x1b[33m' : level === 'DEBUG' ? '\x1b[35m' : '\x1b[32m';
   const detailStr = detail ? ` | ${typeof detail === 'object' ? JSON.stringify(detail, null, 2) : detail}` : '';
   console.log(`[${time}] ${color}[${level}]\x1b[0m ${message}${detailStr}`);
+}
+
+function rewriteLocationHeader(locationHeader: string, publicHost: string, targetHost: string): string {
+  if (!locationHeader || typeof locationHeader !== 'string') return locationHeader;
+  
+  if (/^https?:\/\/[a-z0-9-]+\.corelabs\.network/i.test(locationHeader)) {
+    return locationHeader;
+  }
+
+  const targetEscaped = targetHost.replace(/\./g, '\\.');
+
+  let rewritten = locationHeader
+    .replace(new RegExp(`^https?:\\/\\/${targetEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
+    .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+
+  return rewritten;
 }
 
 // AES-256-GCM End-to-End Encryption Engine
@@ -597,10 +613,7 @@ wss.on('connection', (ws: WebSocket, req) => {
 
                   if (lowerK === 'location' && typeof headerValue === 'string') {
                     const publicHost = `${session.subdomain}-tunnel.${BASE_DOMAIN}`;
-                    
-                    headerValue = headerValue
-                      .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9-]+)(?::\d+)?/gi, `https://${publicHost}`);
-                    
+                    headerValue = rewriteLocationHeader(headerValue, publicHost, session.targetHost);
                     log('INFO', `[Redirect Rewritten 301/302] Location header -> ${headerValue}`);
                   }
 

@@ -35,6 +35,22 @@ function cleanSubdomainInput(inputStr) {
   return str;
 }
 
+function rewriteLocationHeader(locationHeader, publicHost, targetHost) {
+  if (!locationHeader || typeof locationHeader !== 'string') return locationHeader;
+  
+  if (/^https?:\/\/[a-z0-9-]+\.corelabs\.network/i.test(locationHeader)) {
+    return locationHeader;
+  }
+
+  const targetEscaped = targetHost.replace(/\./g, '\\.');
+
+  let rewritten = locationHeader
+    .replace(new RegExp(`^https?:\\/\\/${targetEscaped}(:\\d+)?`, 'gi'), `https://${publicHost}`)
+    .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3})(?::\d+)?/gi, `https://${publicHost}`);
+
+  return rewritten;
+}
+
 function renderAsciiBanner(stepText = '') {
   console.clear();
   console.log('\x1b[36m%s\x1b[0m', `
@@ -44,7 +60,7 @@ function renderAsciiBanner(stepText = '') {
  ██║     ██║   ██║██╔══██╗██╔══╝  ██║     ██╔══██║██╔══██╗╚════██║
  ╚██████╗╚██████╔╝██║  ██║███████╗███████╗██║  ██║██████╔╝███████║
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                     T U N N E L   v2.4
+                     T U N N E L   v2.5
   `);
   if (stepText) {
     console.log(` \x1b[46m\x1b[30m ${stepText} \x1b[0m\n`);
@@ -507,8 +523,7 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       const headers = Object.assign({}, localRes.headers);
 
       if (headers.location && typeof headers.location === 'string') {
-        headers.location = headers.location
-          .replace(/^https?:\/\/(?:127\.0\.0\.1|localhost|(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}|[a-z0-9-]+)(?::\d+)?/gi, `https://${publicHost}`);
+        headers.location = rewriteLocationHeader(headers.location, publicHost, actualTargetHost);
       }
 
       if (contentType.includes('text/html') || contentType.includes('javascript') || contentType.includes('json') || contentType.includes('css')) {
