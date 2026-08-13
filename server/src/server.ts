@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import http from 'http';
 import net from 'net';
+import crypto from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CloudflareManager } from './cloudflare';
 
@@ -14,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/tunnel-bridge' });
 const PORT = process.env.PORT || 5080;
 const DOMAIN = process.env.DOMAIN_NAME || 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
-const SERVER_VERSION = '1.8.0';
+const SERVER_VERSION = '2.0.0';
 const cfManager = new CloudflareManager();
 
 function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail?: any) {
@@ -22,6 +23,29 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, detail
   const color = level === 'ERROR' ? '\x1b[31m' : level === 'WARN' ? '\x1b[33m' : level === 'DEBUG' ? '\x1b[35m' : '\x1b[32m';
   const detailStr = detail ? ` | ${typeof detail === 'object' ? JSON.stringify(detail, null, 2) : detail}` : '';
   console.log(`[${time}] ${color}[${level}]\x1b[0m ${message}${detailStr}`);
+}
+
+// AES-256-GCM End-to-End Encryption Engine
+function encryptFrame(dataObj: any, secretKeyHex: string): { iv: string; tag: string; payload: string } {
+  const key = Buffer.from(secretKeyHex, 'hex');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const jsonStr = JSON.stringify(dataObj);
+  let encrypted = cipher.update(jsonStr, 'utf8', 'base64');
+  encrypted += cipher.final('base64');
+  const tag = cipher.getAuthTag().toString('base64');
+  return { iv: iv.toString('base64'), tag, payload: encrypted };
+}
+
+function decryptFrame(encryptedObj: { iv: string; tag: string; payload: string }, secretKeyHex: string): any {
+  const key = Buffer.from(secretKeyHex, 'hex');
+  const iv = Buffer.from(encryptedObj.iv, 'base64');
+  const tag = Buffer.from(encryptedObj.tag, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  let decrypted = decipher.update(encryptedObj.payload, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
+  return JSON.parse(decrypted);
 }
 
 app.use(cors());
@@ -49,12 +73,158 @@ interface TunnelSession {
   targetPort: number;
   serviceType: string;
   autoSubTunnels: boolean;
+  encryptionKey: string;
   connectedAt: Date;
   pendingRequests: Map<string, PendingRequest>;
 }
 
 const activeTunnels = new Map<string, TunnelSession>();
 const activeTcpSockets = new Map<string, net.Socket>();
+
+function renderPremiumErrorPage(title: string, subtitle: string, message: string, code: number = 404): string {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${code} - ${title} | CoreLabs Tunnel Security</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      background-color: #07070a;
+      color: #e2e8f0;
+      font-family: 'Outfit', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .gradient-bg {
+      position: absolute;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(168, 85, 247, 0.08) 40%, rgba(0,0,0,0) 70%);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 0;
+      pointer-events: none;
+      animation: pulseGlow 8s infinite alternate ease-in-out;
+    }
+    @keyframes pulseGlow {
+      0% { opacity: 0.5; transform: translate(-50%, -50%) scale(0.9); }
+      100% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
+    }
+    .card {
+      position: relative;
+      z-index: 1;
+      background: rgba(18, 18, 26, 0.75);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 24px;
+      padding: 3rem 2.5rem;
+      max-width: 520px;
+      width: 90%;
+      text-align: center;
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-radius: 99px;
+      margin-bottom: 1.5rem;
+    }
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      background: #ef4444;
+      border-radius: 50%;
+      box-shadow: 0 0 10px #ef4444;
+      animation: blink 1.5s infinite;
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    p.subtitle {
+      color: #94a3b8;
+      font-size: 1.05rem;
+      margin-bottom: 1.5rem;
+    }
+    .info-box {
+      background: rgba(10, 10, 15, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 2rem;
+      text-align: left;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.88rem;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .btn {
+      display: inline-block;
+      background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+      color: #ffffff;
+      font-weight: 600;
+      text-decoration: none;
+      padding: 12px 28px;
+      border-radius: 12px;
+      transition: all 0.3s ease;
+      box-shadow: 0 8px 20px rgba(99, 102, 241, 0.3);
+    }
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 25px rgba(99, 102, 241, 0.4);
+    }
+    .footer {
+      margin-top: 2rem;
+      font-size: 0.8rem;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <div class="gradient-bg"></div>
+  <div class="card">
+    <div class="badge">
+      <div class="badge-dot"></div>
+      HTTP ${code} ${title}
+    </div>
+    <h1>${subtitle}</h1>
+    <p class="subtitle">${message}</p>
+
+    <div class="info-box">
+      <div>🔒 <b>Sécurité :</b> Chiffrement AES-256-GCM</div>
+      <div>⚡ <b>Moteur :</b> CoreLabs Tunnel v${SERVER_VERSION}</div>
+      <div>📡 <b>Statut :</b> En attente du client CLI local</div>
+    </div>
+
+    <a href="https://${DOMAIN}" class="btn">Consulter CoreLabs Network</a>
+
+    <div class="footer">
+      CoreLabs Tunnel Security Engine &bull; Transport Sécurisé de Bout en Bout
+    </div>
+  </div>
+</body>
+</html>`;
+}
 
 function broadcastClientUpdate(reason: string = 'Mise à jour du serveur') {
   log('INFO', `[Auto-Update Broadcast] Signal envoyé aux clients. Raison: ${reason}`);
@@ -107,7 +277,7 @@ function parseMinecraftHandshakeHost(buffer: Buffer): string | null {
   }
 }
 
-// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & TARGETED ROUTER
+// 1. WILDCARD SUBDOMAIN MULTI-TUNNEL & TARGETED ROUTER WITH CUSTOM 404 PAGE
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   
@@ -129,16 +299,12 @@ app.use((req, res, next) => {
           if (session.pendingRequests.has(requestId)) {
             session.pendingRequests.delete(requestId);
             log('WARN', `Timeout 504 pour la requête ${requestId} sur ${sub}${requestPath}`);
-            res.status(504).send(`
-              <html>
-                <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-                  <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-                    <h3 style="color:#ef4444;">⚠️ CoreLabs Tunnel Timeout (504)</h3>
-                    <p style="color:#aaa;">Le service local ${session.targetHost}:${session.targetPort} n'a pas répondu à la page ${requestPath}.</p>
-                  </div>
-                </body>
-              </html>
-            `);
+            res.status(504).send(renderPremiumErrorPage(
+              'Gateway Timeout',
+              'Service Indisponible (504)',
+              `L'application locale sur ${session.targetHost}:${session.targetPort} n'a pas répondu à la page <b>${requestPath}</b>.`,
+              504
+            ));
           }
         }, 15000);
 
@@ -151,17 +317,24 @@ app.use((req, res, next) => {
         const rawBodyBuf: Buffer = (req as any).rawBody;
         const requestBodyB64 = rawBodyBuf && rawBodyBuf.length > 0 ? rawBodyBuf.toString('base64') : '';
 
+        const payloadObj = {
+          type: 'HTTP_REQUEST',
+          requestId,
+          method: req.method,
+          path: requestPath,
+          headers: forwardedHeaders,
+          body: requestBodyB64,
+          subdomain: sub,
+          publicHost: host
+        };
+
         try {
-          session.ws.send(JSON.stringify({
-            type: 'HTTP_REQUEST',
-            requestId,
-            method: req.method,
-            path: requestPath,
-            headers: forwardedHeaders,
-            body: requestBodyB64,
-            subdomain: sub,
-            publicHost: host
-          }));
+          if (session.encryptionKey) {
+            const encryptedFrame = encryptFrame(payloadObj, session.encryptionKey);
+            session.ws.send(JSON.stringify({ type: 'ENCRYPTED_FRAME', data: encryptedFrame }));
+          } else {
+            session.ws.send(JSON.stringify(payloadObj));
+          }
         } catch (wsErr: any) {
           log('ERROR', 'Erreur envoi WebSocket HTTP_REQUEST', wsErr.message);
         }
@@ -169,17 +342,12 @@ app.use((req, res, next) => {
         return;
       } else {
         log('WARN', `Sous-domaine inactif pour la page: ${sub}${requestPath}`);
-        return res.status(404).send(`
-          <html>
-            <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-              <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-                <h3 style="color:#eab308;">⚠️ Tunnel Non Connecté</h3>
-                <p style="color:#aaa;">Le tunnel <b>${sub}</b> n'est actuellement pas connecté.</p>
-                <p style="color:#8a8a9a; font-size:0.85rem;">Lancez la commande <code>corelabs-tunnel</code> sur votre ordinateur pour ouvrir ce sous-domaine.</p>
-              </div>
-            </body>
-          </html>
-        `);
+        return res.status(404).send(renderPremiumErrorPage(
+          'Page Inaccessible',
+          'Tunnel Non Connecté',
+          `Le tunnel <b>${sub}-tunnel.${BASE_DOMAIN}</b> n'est pas connecté. Lancez la commande <code>corelabs-tunnel</code> sur votre machine.`,
+          404
+        ));
       }
     }
   }
@@ -329,14 +497,23 @@ Write-Host "[✓] Lancement de CoreLabs Tunnel..." -ForegroundColor Yellow
 `);
 });
 
-// WEBSOCKET BRIDGE
+// WEBSOCKET BRIDGE WITH AES-256-GCM DECRYPTION
 wss.on('connection', (ws: WebSocket, req) => {
   log('INFO', `Connexion WebSocket client reçue depuis ${req.socket.remoteAddress}`);
   const registeredSubdomains: string[] = [];
 
   ws.on('message', async (data: string) => {
     try {
-      const msg = JSON.parse(data.toString());
+      let msg = JSON.parse(data.toString());
+
+      // If frame is encrypted with AES-256-GCM
+      if (msg.type === 'ENCRYPTED_FRAME' && msg.data) {
+        const anySub = registeredSubdomains[0];
+        const session = anySub ? activeTunnels.get(anySub) : null;
+        if (session && session.encryptionKey) {
+          msg = decryptFrame(msg.data, session.encryptionKey);
+        }
+      }
 
       if (msg.type === 'REGISTER_TUNNEL' || msg.type === 'REGISTER_MULTI_TUNNEL') {
         const tunnelsToRegister = msg.tunnels || [{
@@ -347,6 +524,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           autoSubTunnels: msg.autoSubTunnels
         }];
 
+        const sessionEncryptionKey = msg.encryptionKey || crypto.randomBytes(32).toString('hex');
         const registeredResults = [];
 
         for (const t of tunnelsToRegister) {
@@ -361,6 +539,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             targetPort: t.targetPort,
             serviceType: t.serviceType,
             autoSubTunnels: t.autoSubTunnels !== false,
+            encryptionKey: sessionEncryptionKey,
             connectedAt: new Date(),
             pendingRequests: new Map()
           });
@@ -370,7 +549,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             publicUrl = `${cleanSubdomain}-tunnel.${BASE_DOMAIN}:25565`;
           }
 
-          log('INFO', `[Tunnel Registered] Subdomain: ${cleanSubdomain} -> ${t.targetHost}:${t.targetPort} -> Public: ${publicUrl}`);
+          log('INFO', `[Tunnel Registered AES-256-GCM] Subdomain: ${cleanSubdomain} -> ${t.targetHost}:${t.targetPort} -> Public: ${publicUrl}`);
 
           registeredResults.push({
             subdomain: cleanSubdomain,
@@ -384,7 +563,8 @@ wss.on('connection', (ws: WebSocket, req) => {
           type: 'TUNNEL_READY',
           tunnels: registeredResults,
           domain: BASE_DOMAIN,
-          serverVersion: SERVER_VERSION
+          serverVersion: SERVER_VERSION,
+          encryptionKey: sessionEncryptionKey
         }));
       }
 

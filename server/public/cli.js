@@ -13,11 +13,35 @@ const { exec, spawn } = require('child_process');
 const SERVER_HOST = 'tunnel.corelabs.network';
 const BASE_DOMAIN = 'corelabs.network';
 let lastHotUpdate = null;
+let currentEncryptionKey = null;
 
 function debugLog(msg, data) {
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
   if (data) console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`, data);
   else console.log(`\x1b[90m[${timestamp}] [DEBUG] ${msg}\x1b[0m`);
+}
+
+// AES-256-GCM End-to-End Encryption Engine
+function encryptFrame(dataObj, secretKeyHex) {
+  const key = Buffer.from(secretKeyHex, 'hex');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const jsonStr = JSON.stringify(dataObj);
+  let encrypted = cipher.update(jsonStr, 'utf8', 'base64');
+  encrypted += cipher.final('base64');
+  const tag = cipher.getAuthTag().toString('base64');
+  return { iv: iv.toString('base64'), tag, payload: encrypted };
+}
+
+function decryptFrame(encryptedObj, secretKeyHex) {
+  const key = Buffer.from(secretKeyHex, 'hex');
+  const iv = Buffer.from(encryptedObj.iv, 'base64');
+  const tag = Buffer.from(encryptedObj.tag, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  let decrypted = decipher.update(encryptedObj.payload, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
+  return JSON.parse(decrypted);
 }
 
 function getInstallDir() {
@@ -51,7 +75,6 @@ function loadActiveSession() {
   return null;
 }
 
-// Windows & Cross-Platform Auto-Start Engine (Runs in Background on Windows Boot)
 function configureAutoStart(enable) {
   try {
     const installDir = getInstallDir();
@@ -64,13 +87,12 @@ function configureAutoStart(enable) {
       if (enable) {
         const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "node.exe """ & "${cliPath.replace(/\\/g, '\\\\')}" & """ --auto-resume", 0, False\n`;
         fs.writeFileSync(vbsPath, vbsContent, 'utf-8');
-        debugLog('[AUTO-START] Raccourci de démarrage automatique Windows VBS créé.');
+        debugLog('[AUTO-START] Raccourci VBS de démarrage Windows créé.');
       } else {
         if (fs.existsSync(vbsPath)) fs.unlinkSync(vbsPath);
         debugLog('[AUTO-START] Démarrage automatique Windows désactivé.');
       }
     } else {
-      // Linux / macOS crontab @reboot entry
       const cronCmd = `@reboot node "${cliPath}" --auto-resume >/dev/null 2>&1\n`;
       exec(`(crontab -l 2>/dev/null | grep -v "CoreLabsTunnelAutoStart"; echo "${cronCmd}") | crontab -`);
     }
@@ -347,7 +369,7 @@ async function discoverLANDevices() {
             if (ip !== '127.0.0.1' && !ip.startsWith('224.') && !ip.endsWith('.255')) {
               let name = `Appareil LAN (${ip})`;
               if (ip.endsWith('.1')) name = 'Routeur / Box Internet';
-              else if (ip === localIP) name = 'Cette Machine (Localhost)';
+              else if (ip === localIP) name = 'Cette Machine (${os.hostname()})';
               devices.push({ ip, name });
             }
           }
@@ -396,14 +418,12 @@ function handleTcpConnect(msg, targetHost, targetPort, sendWsMessage) {
   });
 }
 
-// Multi-Page, Targeted Multi-Device Subdomains & LAN Proxy Handler
 function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   debugLog(`Requête HTTP page [${reqMsg.requestId}] Subdomain: ${reqMsg.subdomain}`, { method: reqMsg.method, path: reqMsg.path });
 
   const publicHost = reqMsg.publicHost || `${reqMsg.subdomain}-tunnel.${BASE_DOMAIN}`;
   let reqPath = reqMsg.path || '/';
 
-  // Match target tunnel for this specific subdomain
   const targetTunnel = tunnelsList.find(t => t.subdomain === reqMsg.subdomain) || tunnelsList[0];
   let actualTargetHost = targetTunnel.targetHost || '127.0.0.1';
   let actualTargetPort = targetTunnel.targetPort || 80;
@@ -498,10 +518,10 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
       headers: { 'content-type': 'text/html' },
       body: Buffer.from(`
         <html>
-          <body style="background:#0a0a0c; color:#fff; font-family:monospace; display:flex; justify-content:center; align-items:center; height:100vh;">
-            <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:8px;">
-              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Appareil Distant Inaccessible (502)</h2>
-              <p style="color:#aaa;">Impossible de contacter le service local sur l'appareil distant <b>${actualTargetHost}:${actualTargetPort}</b> pour le chemin <b>${reqPath}</b></p>
+          <body style="background:#0a0a0c; color:#fff; font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh;">
+            <div style="text-align:center; border:1px solid #333; padding:2rem; border-radius:12px; background:#12121a;">
+              <h2 style="color:#ef4444;">⚠️ CoreLabs Tunnel — Service Inaccessible (502)</h2>
+              <p style="color:#aaa;">Impossible de contacter le service local sur <b>${actualTargetHost}:${actualTargetPort}</b> pour la page <b>${reqPath}</b></p>
             </div>
           </body>
         </html>
@@ -518,116 +538,150 @@ function handleIncomingTunnelRequest(reqMsg, tunnelsList, sendWsMessage) {
   localReq.end();
 }
 
+// Resilient WebSocket Client with Exponential Backoff Auto-Reconnection Engine
 async function startMultiTunnelSession(sessionConfig) {
   const { tunnels, autoStart } = sessionConfig;
-
-  // Save session configuration for seamless auto-resume and auto-start on boot
   saveActiveSession(sessionConfig);
   if (autoStart !== undefined) configureAutoStart(autoStart);
 
-  console.clear();
-  console.log('\x1b[36m%s\x1b[0m', '======================================================');
-  console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
-  console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
+  let retryDelay = 1000;
+  let isReconnecting = false;
 
-  for (let i = 0; i < tunnels.length; i++) {
-    const t = tunnels[i];
-    console.log(`[${i+1}/${tunnels.length}] 🔍 Vérification de ${t.targetHostLabel || t.targetHost}:${t.targetPort}...`);
-    t.isPortActive = await checkLocalPortActive(t.targetHost, t.targetPort);
-    if (t.isPortActive) {
-      console.log(`      \x1b[32m✔ Service actif sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
-    } else {
-      console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
+  async function connectBridge() {
+    console.clear();
+    console.log('\x1b[36m%s\x1b[0m', '======================================================');
+    console.log('\x1b[36m%s\x1b[0m', '      CORELABS TUNNEL — VÉRIFICATION DE CONNEXION     ');
+    console.log('\x1b[36m%s\x1b[0m', '======================================================\n');
+
+    for (let i = 0; i < tunnels.length; i++) {
+      const t = tunnels[i];
+      console.log(`[${i+1}/${tunnels.length}] 🔍 Vérification de ${t.targetHostLabel || t.targetHost}:${t.targetPort}...`);
+      t.isPortActive = await checkLocalPortActive(t.targetHost, t.targetPort);
+      if (t.isPortActive) {
+        console.log(`      \x1b[32m✔ Service actif sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
+      } else {
+        console.log(`      \x1b[33m⚠️ Attention : Aucun service en écoute sur ${t.targetHost}:${t.targetPort}\x1b[0m`);
+      }
+    }
+
+    console.log(`\n📡 Connexion au pont WebSocket CoreLabs Server (AES-256-GCM)...`);
+
+    try {
+      const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
+
+      const sendWs = (msgObj) => {
+        if (currentEncryptionKey) {
+          const encryptedFrame = encryptFrame(msgObj, currentEncryptionKey);
+          ws.send(JSON.stringify({ type: 'ENCRYPTED_FRAME', data: encryptedFrame }));
+        } else {
+          ws.send(JSON.stringify(msgObj));
+        }
+      };
+
+      ws.onopen = () => {
+        console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
+        retryDelay = 1000; // Reset retry backoff on clean connection
+        isReconnecting = false;
+
+        sendWs({
+          type: 'REGISTER_MULTI_TUNNEL',
+          tunnels: tunnels.map(t => ({
+            subdomain: t.subdomain,
+            serviceType: t.serviceType,
+            targetHost: t.targetHost,
+            targetPort: t.targetPort,
+            autoSubTunnels: t.autoSubTunnels !== false
+          }))
+        });
+
+        setInterval(() => {
+          sendWs({ type: 'PING' });
+        }, 12000);
+
+        setTimeout(() => {
+          renderMultiDashboard({ tunnels, autoStart });
+        }, 800);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          let msgData = event.data || event;
+          let msg = JSON.parse(msgData.toString());
+
+          if (msg.type === 'ENCRYPTED_FRAME' && msg.data && currentEncryptionKey) {
+            msg = decryptFrame(msg.data, currentEncryptionKey);
+          }
+
+          if (msg.type === 'UPDATE_CLIENT') {
+            applyLiveHotUpdate();
+            return;
+          }
+
+          if (msg.type === 'TUNNEL_READY') {
+            if (msg.encryptionKey) currentEncryptionKey = msg.encryptionKey;
+            if (msg.tunnels) {
+              msg.tunnels.forEach(rt => {
+                const found = tunnels.find(t => t.subdomain === rt.subdomain);
+                if (found) found.publicUrl = rt.publicUrl;
+              });
+            }
+          }
+
+          if (msg.type === 'HTTP_REQUEST') {
+            handleIncomingTunnelRequest(msg, tunnels, sendWs);
+          }
+
+          if (msg.type === 'TCP_CONNECT') {
+            const tMatch = tunnels.find(t => t.subdomain === msg.subdomain) || tunnels[0];
+            handleTcpConnect(msg, tMatch.targetHost, tMatch.targetPort, sendWs);
+          }
+
+          if (msg.type === 'TCP_DATA') {
+            const localSocket = localTcpSockets.get(msg.connectionId);
+            if (localSocket && !localSocket.destroyed) {
+              localSocket.write(Buffer.from(msg.data, 'base64'));
+            }
+          }
+
+          if (msg.type === 'TCP_CLOSE') {
+            const localSocket = localTcpSockets.get(msg.connectionId);
+            if (localSocket) {
+              localSocket.destroy();
+              localTcpSockets.delete(msg.connectionId);
+            }
+          }
+
+        } catch (err) {
+          debugLog('Erreur lecture message WS:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        scheduleReconnection();
+      };
+
+      ws.onerror = (err) => {
+        debugLog('Erreur WebSocket:', err);
+        scheduleReconnection();
+      };
+
+    } catch (err) {
+      debugLog('Exception connexion WS:', err);
+      scheduleReconnection();
     }
   }
 
-  console.log(`\n📡 Établissement du pont WebSocket CoreLabs Server pour ${tunnels.length} tunnel(s)...`);
-
-  try {
-    const ws = new ZeroDepWebSocketClient(`wss://${SERVER_HOST}/tunnel-bridge`);
-
-    const sendWs = (msgObj) => {
-      ws.send(JSON.stringify(msgObj));
-    };
-
-    ws.onopen = () => {
-      console.log(`      \x1b[32m✔ Pont WebSocket connecté avec succès !\x1b[0m`);
-
-      sendWs({
-        type: 'REGISTER_MULTI_TUNNEL',
-        tunnels: tunnels.map(t => ({
-          subdomain: t.subdomain,
-          serviceType: t.serviceType,
-          targetHost: t.targetHost,
-          targetPort: t.targetPort,
-          autoSubTunnels: t.autoSubTunnels !== false
-        }))
-      });
-
-      setInterval(() => {
-        sendWs({ type: 'PING' });
-      }, 15000);
-
-      setTimeout(() => {
-        renderMultiDashboard({ tunnels, autoStart });
-      }, 800);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msgData = event.data || event;
-        const msg = JSON.parse(msgData.toString());
-
-        if (msg.type === 'UPDATE_CLIENT') {
-          applyLiveHotUpdate();
-          return;
-        }
-
-        if (msg.type === 'TUNNEL_READY' && msg.tunnels) {
-          msg.tunnels.forEach(rt => {
-            const found = tunnels.find(t => t.subdomain === rt.subdomain);
-            if (found) found.publicUrl = rt.publicUrl;
-          });
-        }
-
-        if (msg.type === 'HTTP_REQUEST') {
-          handleIncomingTunnelRequest(msg, tunnels, sendWs);
-        }
-
-        if (msg.type === 'TCP_CONNECT') {
-          const tMatch = tunnels.find(t => t.subdomain === msg.subdomain) || tunnels[0];
-          handleTcpConnect(msg, tMatch.targetHost, tMatch.targetPort, sendWs);
-        }
-
-        if (msg.type === 'TCP_DATA') {
-          const localSocket = localTcpSockets.get(msg.connectionId);
-          if (localSocket && !localSocket.destroyed) {
-            localSocket.write(Buffer.from(msg.data, 'base64'));
-          }
-        }
-
-        if (msg.type === 'TCP_CLOSE') {
-          const localSocket = localTcpSockets.get(msg.connectionId);
-          if (localSocket) {
-            localSocket.destroy();
-            localTcpSockets.delete(msg.connectionId);
-          }
-        }
-
-      } catch (err) {
-        debugLog('Erreur lecture message WS:', err);
-      }
-    };
-
-    ws.onerror = (err) => {
-      debugLog('Erreur connexion WebSocket:', err);
-      renderMultiDashboard({ tunnels, autoStart });
-    };
-
-  } catch (err) {
-    debugLog('Exception connexion WS:', err);
-    renderMultiDashboard({ tunnels, autoStart });
+  function scheduleReconnection() {
+    if (isReconnecting) return;
+    isReconnecting = true;
+    console.log(`\n\x1b[33m⚡ Connexion au pont perdue. Reconnexion automatique dans ${retryDelay / 1000}s...\x1b[0m`);
+    setTimeout(() => {
+      retryDelay = Math.min(retryDelay * 2, 15000); // Exponential backoff max 15s
+      connectBridge();
+    }, retryDelay);
   }
+
+  connectBridge();
 }
 
 async function main() {
@@ -705,7 +759,6 @@ async function main() {
     }
 
   } else {
-    // Single mode setup
     const serviceType = await selectMenu('Quel type de service souhaitez-vous exposer ?', [
       { label: '🎮  Serveur Minecraft Java (Port 25565)', value: 'minecraft-java' },
       { label: '🎮  Serveur Minecraft Bedrock / PE (Port 19132)', value: 'minecraft-bedrock' },
@@ -747,7 +800,6 @@ async function main() {
     });
   }
 
-  // Auto-Start on OS Boot Menu Option
   const autoStartChoices = [
     { label: '🚀  [✓] ACTIVÉ — Lancer le tunnel automatiquement au démarrage de l\'ordinateur (En arrière-plan)', value: true },
     { label: '🔒  [ ] DÉSACTIVÉ — Lancement manuel uniquement', value: false }
@@ -775,7 +827,9 @@ function renderMultiDashboard(info) {
 
     const autoStartStatus = info.autoStart ? '\x1b[32m● ACTIVÉ (Arrière-plan au démarrage)\x1b[0m' : '\x1b[90m○ DÉSACTIVÉ\x1b[0m';
     const hotReloadStatus = lastHotUpdate ? `\x1b[32m● EN DIRECT À ${lastHotUpdate}\x1b[0m` : '\x1b[36m● PRÊT (Zéro Redémarrage)\x1b[0m';
+    const encStatus = currentEncryptionKey ? '\x1b[32m● AES-256-GCM (Chiffrement Authentifié End-to-End)\x1b[0m' : '\x1b[33m● STANDARD\x1b[0m';
 
+    console.log(` \x1b[42m\x1b[30m ÉCURITÉ \x1b[0m ${encStatus}`);
     console.log(` \x1b[44m\x1b[37m AUTO-START BOOT \x1b[0m ${autoStartStatus}`);
     console.log(` \x1b[45m\x1b[37m LIVE HOT-RELOAD  \x1b[0m ${hotReloadStatus}`);
     console.log('\n----------------------------------------------------------------------------');
